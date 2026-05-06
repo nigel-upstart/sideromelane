@@ -275,21 +275,27 @@ impl SideromelaneApp {
     }
 
     fn apply_indexer_event(&mut self, event: IndexerEvent) {
-        let Some(folder) = self.folder.as_mut() else {
-            return;
-        };
-
         match event {
+            IndexerEvent::ScanFailed { root, message } => {
+                self.status = format!("Scan failed for {}: {message}", root.display());
+                if let Some(folder) = self.folder.as_mut() {
+                    folder.indexes_ready = false;
+                }
+            }
             IndexerEvent::NotesDiscovered(records) => {
-                merge_discovered_notes(folder, records);
+                if let Some(folder) = self.folder.as_mut() {
+                    merge_discovered_notes(folder, records);
+                }
             }
             IndexerEvent::IndexUpdated {
                 search,
                 folder: folder_index,
             } => {
-                folder.search_index = search;
-                folder.folder_index = folder_index;
-                folder.indexes_ready = true;
+                if let Some(folder) = self.folder.as_mut() {
+                    folder.search_index = search;
+                    folder.folder_index = folder_index;
+                    folder.indexes_ready = true;
+                }
             }
         }
     }

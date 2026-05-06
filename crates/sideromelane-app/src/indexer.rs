@@ -67,6 +67,13 @@ pub enum IndexerEvent {
         /// Backlink and graph index.
         folder: FolderIndex,
     },
+    /// The walker failed while enumerating notes under the folder root.
+    ScanFailed {
+        /// Folder root that the failed scan was targeting.
+        root: PathBuf,
+        /// Human-readable error message suitable for the status bar.
+        message: String,
+    },
 }
 
 /// Handle owned by the UI to talk to the background worker.
@@ -133,7 +140,22 @@ fn worker_loop(
     while let Ok(command) = commands.recv() {
         match command {
             IndexerCommand::Rescan { root, options } => {
-                let discovered = discover_notes(&root, &options);
+                let discovered = match discover_notes(&root, &options) {
+                    Ok(records) => records,
+                    Err(message) => {
+                        if events
+                            .send(IndexerEvent::ScanFailed {
+                                root: root.clone(),
+                                message,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        context.request_repaint();
+                        continue;
+                    }
+                };
                 current_notes.clone_from(&discovered);
 
                 if events
@@ -175,13 +197,13 @@ fn worker_loop(
     }
 }
 
-fn discover_notes(root: &Path, options: &WalkOptions) -> Vec<NoteRecord> {
+fn discover_notes(root: &Path, options: &WalkOptions) -> Result<Vec<NoteRecord>, String> {
     // `walk_markdown_paths` already returns paths sorted; no need to re-sort.
-    walk_markdown_paths(root, options)
-        .unwrap_or_default()
+    let paths = walk_markdown_paths(root, options).map_err(|error| error.to_string())?;
+    Ok(paths
         .into_iter()
         .filter_map(|absolute_path| read_note(root, absolute_path).ok())
-        .collect()
+        .collect())
 }
 
 fn read_note(root: &Path, absolute_path: PathBuf) -> io::Result<NoteRecord> {
