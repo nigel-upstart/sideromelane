@@ -69,6 +69,14 @@ pub enum FolderSettingsError {
     Io(io::Error),
     /// JSON deserialization or serialization error.
     Serde(serde_json::Error),
+    /// The settings file was written by a newer client and may contain fields
+    /// whose semantics this version does not understand.
+    FutureVersion {
+        /// Version found on disk.
+        found: u32,
+        /// Maximum version this build supports.
+        supported: u32,
+    },
 }
 
 impl fmt::Display for FolderSettingsError {
@@ -76,6 +84,10 @@ impl fmt::Display for FolderSettingsError {
         match self {
             Self::Io(error) => write!(formatter, "settings io error: {error}"),
             Self::Serde(error) => write!(formatter, "settings parse error: {error}"),
+            Self::FutureVersion { found, supported } => write!(
+                formatter,
+                "settings version {found} is newer than supported version {supported}",
+            ),
         }
     }
 }
@@ -85,6 +97,7 @@ impl std::error::Error for FolderSettingsError {
         match self {
             Self::Io(error) => Some(error),
             Self::Serde(error) => Some(error),
+            Self::FutureVersion { .. } => None,
         }
     }
 }
@@ -121,6 +134,12 @@ impl FolderSettings {
         match fs::read(&path) {
             Ok(bytes) => {
                 let settings = serde_json::from_slice::<Self>(&bytes)?;
+                if settings.version > CURRENT_SETTINGS_VERSION {
+                    return Err(FolderSettingsError::FutureVersion {
+                        found: settings.version,
+                        supported: CURRENT_SETTINGS_VERSION,
+                    });
+                }
                 Ok(settings)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
@@ -217,6 +236,31 @@ mod tests {
         let bytes = std::fs::read(metadata_dir.join(FOLDER_SETTINGS_FILE)).expect("read");
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
         assert_eq!(value.get("future_field"), Some(&json!({"hello": "world"})));
+    }
+
+    #[test]
+    fn rejects_future_version() {
+        let dir = TempDir::new().expect("tempdir");
+        let metadata_dir = dir.path().join(FOLDER_METADATA_DIR);
+        std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
+        let raw = json!({
+            "version": 999,
+            "ignore": {}
+        });
+        std::fs::write(
+            metadata_dir.join(FOLDER_SETTINGS_FILE),
+            serde_json::to_vec_pretty(&raw).expect("serialize"),
+        )
+        .expect("write");
+
+        let result = FolderSettings::load(dir.path());
+        assert!(matches!(
+            result,
+            Err(super::FolderSettingsError::FutureVersion {
+                found: 999,
+                supported: 1
+            })
+        ));
     }
 
     #[test]
