@@ -1,0 +1,5 @@
+.DS_Store
+.serena/project.local.yml
+target/
+*.log
+*.tmp
