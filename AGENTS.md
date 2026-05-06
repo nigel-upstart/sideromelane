@@ -52,6 +52,23 @@ This is a new Rust toolchain project for a local-only native macOS desktop app.
 - Never commit secrets, local user data, generated app bundles, or signing/notarization credentials.
 - Treat all file contents, IPC payloads, imported documents, and pasted user text as untrusted input.
 
+## Tooling
+
+This repo uses [`just`](https://github.com/casey/just) as the task runner and
+[`lefthook`](https://github.com/evilmartians/lefthook) to orchestrate local Git hooks.
+Recipes live in `justfile`; hook configuration lives in `lefthook.yml`.
+
+Before your first commit in a fresh checkout (including a new worktree), run:
+
+```sh
+just install-tools     # cargo-deny, cargo-machete, typos-cli, taplo-cli, lefthook
+just install-hooks     # wires pre-commit and pre-push via lefthook
+```
+
+`pre-commit` runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`.
+`pre-push` runs the full `just check` and `just audit` gates. If a hook fails, fix the
+underlying issue — never bypass with `--no-verify`.
+
 ## Required Checks
 
 Before considering Rust changes complete, run:
@@ -65,5 +82,3 @@ For dependency or supply-chain changes, also run:
 ```sh
 just audit
 ```
-
-Local Git hooks are managed by `lefthook`; install them with `just install-hooks`.
