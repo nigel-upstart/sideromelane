@@ -176,10 +176,9 @@ fn worker_loop(
 }
 
 fn discover_notes(root: &Path, options: &WalkOptions) -> Vec<NoteRecord> {
-    let mut paths = walk_markdown_paths(root, options).unwrap_or_default();
-    paths.sort();
-
-    paths
+    // `walk_markdown_paths` already returns paths sorted; no need to re-sort.
+    walk_markdown_paths(root, options)
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|absolute_path| read_note(root, absolute_path).ok())
         .collect()
