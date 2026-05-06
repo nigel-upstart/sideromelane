@@ -7,6 +7,19 @@ right agent-skills workflow for the phase of work.
 
 ## Bootstrap
 
+Install the host tooling stack:
+
+```sh
+brew bundle
+```
+
+If Rust is not already installed, initialize it through the Homebrew-installed Rust toolchain
+installer:
+
+```sh
+$(brew --prefix rustup)/bin/rustup-init -y
+```
+
 Install the upstream skills globally, then import the repo default set:
 
 ```sh

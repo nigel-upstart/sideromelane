@@ -38,8 +38,8 @@ audit:
     taplo fmt --check
 
 install-tools:
-    cargo install cargo-deny cargo-machete typos-cli taplo-cli just
-    if (( ! $+commands[lefthook] )); then brew install lefthook; fi
+    brew bundle
+    cargo install cargo-machete
 
 install-hooks:
     lefthook install

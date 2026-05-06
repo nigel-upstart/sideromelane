@@ -29,8 +29,12 @@ This runs:
 Install those tools with:
 
 ```sh
+brew bundle
 just install-tools
 ```
+
+Homebrew provides `cargo-deny`, `typos`, and `taplo`. `cargo-machete` is installed through Cargo by
+`just install-tools`.
 
 ## Git Hooks
 
