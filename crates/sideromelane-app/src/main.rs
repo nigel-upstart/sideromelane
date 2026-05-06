@@ -1,5 +1,6 @@
 #![allow(missing_docs, clippy::too_many_lines)]
 
+mod indexer;
 mod io;
 
 use std::fs;
@@ -11,7 +12,13 @@ use sideromelane_core::{
     FolderIndex, HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId, SearchQuery,
 };
 
+use crate::indexer::{Indexer, IndexerCommand, IndexerEvent, WalkOptions};
 use crate::io::safe_write;
+
+/// Maximum number of indexer events to drain per frame.
+///
+/// Bounded so a burst of background work cannot starve UI input handling.
+const MAX_INDEXER_EVENTS_PER_FRAME: usize = 16;
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -35,10 +42,15 @@ struct SideromelaneApp {
     search_text: String,
     active_block_index: Option<usize>,
     status: String,
+    indexer: Option<Indexer>,
 }
 
 impl eframe::App for SideromelaneApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.indexer.is_none() {
+            self.indexer = Some(Indexer::new(ui.ctx().clone()));
+        }
+        self.drain_indexer_events();
         self.handle_dropped_files(ui.ctx());
 
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
@@ -95,42 +107,34 @@ struct FolderState {
     selected: Option<usize>,
     search_index: HybridSearchIndex,
     folder_index: FolderIndex,
+    /// `true` once the indexer has published its first `IndexUpdated` event
+    /// for the current folder. Until then the search/backlinks/graph panels
+    /// surface a placeholder rather than a misleading empty state.
+    indexes_ready: bool,
 }
 
 impl FolderState {
+    /// Quick-open the folder without performing any indexing work.
+    ///
+    /// Discovery is shallow: we read at most one note (`Untitled.md` if
+    /// present, otherwise the first Markdown file we find) so the user has
+    /// an editable surface immediately. The full rescan is dispatched to
+    /// the background indexer by the caller, and the search/folder indexes
+    /// stay empty (showing "Indexing…") until the first `IndexUpdated`
+    /// event arrives.
     fn load(root: PathBuf) -> std_io::Result<Self> {
-        let mut paths = Vec::new();
-        collect_markdown_paths(&root, &mut paths)?;
-        paths.sort();
+        let initial = initial_note(&root)?;
+        let (notes, selected) =
+            initial.map_or_else(|| (Vec::new(), None), |record| (vec![record], Some(0)));
 
-        let notes = paths
-            .into_iter()
-            .filter_map(|path| NoteRecord::read(&root, path).ok())
-            .collect::<Vec<_>>();
-        let mut folder = Self {
+        Ok(Self {
             root,
             notes,
-            selected: None,
+            selected,
             search_index: HybridSearchIndex::default(),
             folder_index: FolderIndex::default(),
-        };
-        folder.selected = (!folder.notes.is_empty()).then_some(0);
-        folder.rebuild_indexes();
-
-        Ok(folder)
-    }
-
-    fn parsed_notes(&self) -> Vec<MarkdownNote> {
-        self.notes
-            .iter()
-            .map(|note| MarkdownNote::parse(note.note_id.clone(), note.source.clone()))
-            .collect()
-    }
-
-    fn rebuild_indexes(&mut self) {
-        let notes = self.parsed_notes();
-        self.search_index = HybridSearchIndex::from_notes(notes.clone());
-        self.folder_index = FolderIndex::from_notes(notes);
+            indexes_ready: false,
+        })
     }
 
     fn selected_note(&self) -> Option<&NoteRecord> {
@@ -187,8 +191,10 @@ impl SideromelaneApp {
         match FolderState::load(root) {
             Ok(folder) => {
                 self.status = format!("Opened {}", folder.root.display());
+                let scan_root = folder.root.clone();
                 self.folder = Some(folder);
                 self.active_block_index = None;
+                self.dispatch_rescan(scan_root);
             }
             Err(error) => self.status = format!("Open failed: {error}"),
         }
@@ -207,8 +213,12 @@ impl SideromelaneApp {
             dirty: true,
         });
         folder.selected = Some(folder.notes.len() - 1);
-        folder.rebuild_indexes();
+        let scan_root = folder.root.clone();
         self.active_block_index = None;
+        // Adding an unsaved note to disk is deferred to save; still trigger a
+        // rescan so the indexer notices any sibling note changes that may
+        // have happened externally.
+        self.dispatch_rescan(scan_root);
     }
 
     fn save_selected(&mut self) {
@@ -222,10 +232,56 @@ impl SideromelaneApp {
         match safe_write(&note.absolute_path, &note.source) {
             Ok(()) => {
                 note.dirty = false;
-                self.status = format!("Saved {}", note.note_id.relative_path().display());
-                folder.rebuild_indexes();
+                let note_id = note.note_id.clone();
+                let source = note.source.clone();
+                let relative = note.note_id.relative_path().display().to_string();
+                self.status = format!("Saved {relative}");
+                if let Some(indexer) = self.indexer.as_ref() {
+                    indexer.send(IndexerCommand::NoteChanged { note_id, source });
+                }
             }
             Err(error) => self.status = format!("Save failed: {error}"),
+        }
+    }
+
+    fn dispatch_rescan(&mut self, root: PathBuf) {
+        if let Some(folder) = self.folder.as_mut() {
+            folder.indexes_ready = false;
+        }
+        if let Some(indexer) = self.indexer.as_ref() {
+            indexer.send(IndexerCommand::Rescan {
+                root,
+                options: WalkOptions::default(),
+            });
+        }
+    }
+
+    fn drain_indexer_events(&mut self) {
+        for _ in 0..MAX_INDEXER_EVENTS_PER_FRAME {
+            let Some(event) = self.indexer.as_ref().and_then(Indexer::poll) else {
+                break;
+            };
+            self.apply_indexer_event(event);
+        }
+    }
+
+    fn apply_indexer_event(&mut self, event: IndexerEvent) {
+        let Some(folder) = self.folder.as_mut() else {
+            return;
+        };
+
+        match event {
+            IndexerEvent::NotesDiscovered(records) => {
+                merge_discovered_notes(folder, records);
+            }
+            IndexerEvent::IndexUpdated {
+                search,
+                folder: folder_index,
+            } => {
+                folder.search_index = search;
+                folder.folder_index = folder_index;
+                folder.indexes_ready = true;
+            }
         }
     }
 
@@ -271,7 +327,8 @@ impl SideromelaneApp {
                 note.source.push_str("]]\n");
                 note.dirty = true;
                 self.status = format!("Inserted {relative_target}");
-                folder.rebuild_indexes();
+                let scan_root = folder.root.clone();
+                self.dispatch_rescan(scan_root);
             }
             Err(error) => self.status = format!("Image copy failed: {error}"),
         }
@@ -308,11 +365,9 @@ impl SideromelaneApp {
 
         ui.separator();
         ui.heading("Search");
-        let search_changed = ui
-            .add(egui::TextEdit::singleline(&mut self.search_text).hint_text("Search"))
-            .changed();
-        if search_changed {
-            folder.rebuild_indexes();
+        ui.add(egui::TextEdit::singleline(&mut self.search_text).hint_text("Search"));
+        if !folder.indexes_ready {
+            ui.label("Indexing\u{2026}");
         }
 
         let query = if self.search_text.trim().is_empty() {
@@ -419,7 +474,8 @@ impl SideromelaneApp {
 
         if changed {
             folder.notes[index].dirty = true;
-            folder.rebuild_indexes();
+            // Index refresh is deferred to save; typing must not block on
+            // re-indexing every keystroke.
         }
     }
 }
@@ -752,22 +808,81 @@ fn select_note(folder: &mut FolderState, note_id: &NoteId) {
         .position(|note| &note.note_id == note_id);
 }
 
-fn collect_markdown_paths(root: &Path, paths: &mut Vec<PathBuf>) -> std_io::Result<()> {
+/// Pick a single note to surface as the initial editable view.
+///
+/// Prefers `Untitled.md` at the folder root if it exists; otherwise the
+/// first Markdown file found by a shallow read of the root directory.
+/// Returns `Ok(None)` for a folder with no Markdown files, and surfaces
+/// IO errors only when the root itself cannot be read.
+fn initial_note(root: &Path) -> std_io::Result<Option<NoteRecord>> {
+    let preferred = root.join("Untitled.md");
+    if preferred.is_file()
+        && let Ok(record) = NoteRecord::read(root, preferred)
+    {
+        return Ok(Some(record));
+    }
+
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
-            collect_markdown_paths(&path, paths)?;
-        } else if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            && let Ok(record) = NoteRecord::read(root, path)
         {
-            paths.push(path);
+            return Ok(Some(record));
         }
     }
 
-    Ok(())
+    Ok(None)
+}
+
+/// Reconcile the indexer's freshly discovered notes with the current
+/// in-memory list. Existing dirty notes win — we do not overwrite an
+/// in-memory edit with whatever the indexer just read from disk. Notes
+/// the indexer found that the UI doesn't have are appended.
+fn merge_discovered_notes(folder: &mut FolderState, discovered: Vec<indexer::NoteRecord>) {
+    let selected_id = folder
+        .selected
+        .and_then(|index| folder.notes.get(index))
+        .map(|note| note.note_id.clone());
+
+    let mut existing: std::collections::HashMap<NoteId, NoteRecord> = folder
+        .notes
+        .drain(..)
+        .map(|note| (note.note_id.clone(), note))
+        .collect();
+
+    let mut merged: Vec<NoteRecord> = Vec::with_capacity(discovered.len() + existing.len());
+    for record in discovered {
+        if let Some(mut existing_note) = existing.remove(&record.note_id) {
+            existing_note.absolute_path = record.absolute_path;
+            if !existing_note.dirty {
+                existing_note.source = record.source;
+            }
+            merged.push(existing_note);
+        } else {
+            merged.push(NoteRecord {
+                note_id: record.note_id,
+                absolute_path: record.absolute_path,
+                source: record.source,
+                dirty: false,
+            });
+        }
+    }
+    for (_, leftover) in existing {
+        // Carry over any unsaved-on-disk notes (e.g. fresh "Untitled" buffers).
+        merged.push(leftover);
+    }
+
+    folder.selected =
+        selected_id.and_then(|wanted| merged.iter().position(|note| note.note_id == wanted));
+    if folder.selected.is_none() && !merged.is_empty() {
+        folder.selected = Some(0);
+    }
+    folder.notes = merged;
 }
 
 fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
