@@ -28,6 +28,9 @@ pub struct FolderSettings {
     /// Walker ignore configuration.
     #[serde(default)]
     pub ignore: IgnoreSettings,
+    /// UI presentation preferences scoped to this folder.
+    #[serde(default)]
+    pub ui: UiSettings,
     /// Forward-compatibility bag: any unknown fields the loader did not
     /// recognise are preserved here and round-tripped on save.
     #[serde(flatten)]
@@ -39,9 +42,36 @@ impl Default for FolderSettings {
         Self {
             version: CURRENT_SETTINGS_VERSION,
             ignore: IgnoreSettings::default(),
+            ui: UiSettings::default(),
             extra: BTreeMap::new(),
         }
     }
+}
+
+/// UI presentation preferences scoped to a single folder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiSettings {
+    /// When true, the editor soft-wraps long lines to the central pane width.
+    /// When false, the editor scrolls horizontally instead.
+    #[serde(default = "default_editor_word_wrap")]
+    pub editor_word_wrap: bool,
+    /// Folder-relative paths whose tree node should render expanded on next open.
+    /// Used by the files panel.
+    #[serde(default)]
+    pub tree_expanded_paths: Vec<String>,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            editor_word_wrap: default_editor_word_wrap(),
+            tree_expanded_paths: Vec::new(),
+        }
+    }
+}
+
+const fn default_editor_word_wrap() -> bool {
+    true
 }
 
 /// Walker ignore configuration controlled by the user from the folder UI.

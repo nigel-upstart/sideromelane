@@ -459,24 +459,34 @@ impl SideromelaneApp {
             return;
         };
 
-        let mut settings_changed = false;
+        let mut walker_changed = false;
+        let mut ui_changed = false;
         ui.collapsing("Folder settings", |ui| {
-            settings_changed |= ui
+            walker_changed |= ui
                 .checkbox(
                     &mut folder.settings.ignore.include_dotfiles,
                     "Include dotfiles",
                 )
                 .changed();
-            settings_changed |= ui
+            walker_changed |= ui
                 .checkbox(
                     &mut folder.settings.ignore.honor_gitignore,
                     "Honor .gitignore",
                 )
                 .changed();
         });
-        let pending_rescan_root = if settings_changed {
+        ui.collapsing("Editor", |ui| {
+            ui_changed |= ui
+                .checkbox(
+                    &mut folder.settings.ui.editor_word_wrap,
+                    "Word wrap (off = horizontal scroll)",
+                )
+                .changed();
+        });
+        let settings_dirty = walker_changed || ui_changed;
+        let pending_rescan_root = if settings_dirty {
             match folder.settings.save(&folder.root) {
-                Ok(()) => Some(folder.root.clone()),
+                Ok(()) => walker_changed.then(|| folder.root.clone()),
                 Err(error) => {
                     self.status = format!("Settings save failed: {error}");
                     None
@@ -552,11 +562,15 @@ impl SideromelaneApp {
         });
         ui.separator();
 
+        let word_wrap = folder.settings.ui.editor_word_wrap;
         let changed = match self.mode {
-            EditorMode::Raw => raw_editor(ui, &mut folder.notes[index]),
-            EditorMode::LivePreview => {
-                live_preview_editor(ui, &mut folder.notes[index], &mut self.active_block_index)
-            }
+            EditorMode::Raw => raw_editor(ui, &mut folder.notes[index], word_wrap),
+            EditorMode::LivePreview => live_preview_editor(
+                ui,
+                &mut folder.notes[index],
+                &mut self.active_block_index,
+                word_wrap,
+            ),
         };
 
         if changed {
@@ -567,23 +581,45 @@ impl SideromelaneApp {
     }
 }
 
-fn raw_editor(ui: &mut egui::Ui, note: &mut NoteRecord) -> bool {
-    ui.add(
-        egui::TextEdit::multiline(&mut note.source)
-            .code_editor()
-            .desired_rows(32)
-            .lock_focus(true),
-    )
-    .changed()
+fn raw_editor(ui: &mut egui::Ui, note: &mut NoteRecord, word_wrap: bool) -> bool {
+    let available_width = ui.available_width();
+    if word_wrap {
+        ui.add(
+            egui::TextEdit::multiline(&mut note.source)
+                .code_editor()
+                .desired_width(available_width)
+                .desired_rows(32)
+                .lock_focus(true),
+        )
+        .changed()
+    } else {
+        // Horizontal scroll: don't constrain text wrap, let the scroll area handle overflow.
+        let mut changed = false;
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            changed = ui
+                .add(
+                    egui::TextEdit::multiline(&mut note.source)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(32)
+                        .lock_focus(true),
+                )
+                .changed();
+        });
+        changed
+    }
 }
 
 fn live_preview_editor(
     ui: &mut egui::Ui,
     note: &mut NoteRecord,
     active_block_index: &mut Option<usize>,
+    word_wrap: bool,
 ) -> bool {
     let blocks = markdown_blocks(&note.source);
     let mut changed_block = None;
+    let pane_width = ui.available_width();
+    let active_block_width = if word_wrap { pane_width } else { f32::INFINITY };
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (index, block) in blocks.iter().enumerate() {
@@ -593,7 +629,7 @@ fn live_preview_editor(
                     let response = ui.add(
                         egui::TextEdit::multiline(&mut text)
                             .code_editor()
-                            .desired_width(f32::INFINITY)
+                            .desired_width(active_block_width)
                             .desired_rows(block.text.lines().count().max(1)),
                     );
                     if response.changed() {
