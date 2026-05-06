@@ -136,6 +136,10 @@ fn worker_loop(
     // Holds the most recently observed note set so single-note edits can
     // rebuild the global indexes without re-reading the folder.
     let mut current_notes: Vec<NoteRecord> = Vec::new();
+    // The most recent (root, options) pair seen, so a `NoteChanged` for an
+    // unknown note can fall back to a fresh discovery rather than silently
+    // losing the update.
+    let mut last_walk: Option<(PathBuf, WalkOptions)> = None;
 
     while let Ok(command) = commands.recv() {
         match command {
@@ -157,6 +161,7 @@ fn worker_loop(
                     }
                 };
                 current_notes.clone_from(&discovered);
+                last_walk = Some((root, options));
 
                 if events
                     .send(IndexerEvent::NotesDiscovered(discovered))
@@ -176,11 +181,39 @@ fn worker_loop(
                 context.request_repaint();
             }
             IndexerCommand::NoteChanged { note_id, source } => {
-                if let Some(record) = current_notes
+                let known = current_notes
                     .iter_mut()
-                    .find(|record| record.note_id == note_id)
-                {
+                    .find(|record| record.note_id == note_id);
+
+                if let Some(record) = known {
                     record.source = source;
+                } else if let Some((root, options)) = last_walk.as_ref() {
+                    // Brand-new note that the indexer has not seen yet.
+                    // Re-discover so the fresh save shows up in subsequent indexes.
+                    match discover_notes(root, options) {
+                        Ok(records) => {
+                            current_notes = records;
+                            if let Some(record) = current_notes
+                                .iter_mut()
+                                .find(|record| record.note_id == note_id)
+                            {
+                                record.source = source;
+                            }
+                        }
+                        Err(message) => {
+                            if events
+                                .send(IndexerEvent::ScanFailed {
+                                    root: root.clone(),
+                                    message,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                            context.request_repaint();
+                            continue;
+                        }
+                    }
                 }
 
                 let (search, folder) = build_indexes(&current_notes);
