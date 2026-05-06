@@ -1,5 +1,5 @@
 [workspace]
-members  = ["crates/sideromelane-core"]
+members  = ["crates/sideromelane-app", "crates/sideromelane-core"]
 resolver = "3"
 
 [workspace.package]

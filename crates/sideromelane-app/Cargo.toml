@@ -1,0 +1,23 @@
+[package]
+name                   = "sideromelane-app"
+version                = "0.1.0"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "Native macOS desktop app shell for Sideromelane."
+readme                 = "../../README.md"
+keywords               = ["desktop", "local", "macos", "markdown"]
+categories             = ["gui", "text-editors"]
+
+[[bin]]
+name = "sideromelane"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+eframe              = "0.34.2"
+rfd                 = "0.17.2"
+sideromelane-core   = { path = "../sideromelane-core" }
