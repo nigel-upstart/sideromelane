@@ -1,13 +1,20 @@
 #![allow(missing_docs, clippy::too_many_lines)]
 
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Vec2};
 use sideromelane_core::{
-    FolderIndex, HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId, SearchQuery,
+    FolderIndex, FolderSettings, HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId,
+    SearchQuery, WalkOptions, sanitize_asset_filename, validate_image_magic_bytes,
+    walk_markdown_paths,
 };
+
+/// Maximum byte size of an image that can be dropped into the assets folder.
+const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+/// Number of bytes inspected when validating image magic bytes.
+const IMAGE_HEADER_PEEK: u64 = 16;
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -91,13 +98,14 @@ struct FolderState {
     selected: Option<usize>,
     search_index: HybridSearchIndex,
     folder_index: FolderIndex,
+    settings: FolderSettings,
 }
 
 impl FolderState {
     fn load(root: PathBuf) -> io::Result<Self> {
-        let mut paths = Vec::new();
-        collect_markdown_paths(&root, &mut paths)?;
-        paths.sort();
+        let settings = FolderSettings::load(&root).map_err(io::Error::other)?;
+        let paths =
+            walk_markdown_paths(&root, &walk_options_for(&settings)).map_err(io::Error::other)?;
 
         let notes = paths
             .into_iter()
@@ -109,11 +117,27 @@ impl FolderState {
             selected: None,
             search_index: HybridSearchIndex::default(),
             folder_index: FolderIndex::default(),
+            settings,
         };
         folder.selected = (!folder.notes.is_empty()).then_some(0);
         folder.rebuild_indexes();
 
         Ok(folder)
+    }
+
+    fn rescan(&mut self) -> io::Result<()> {
+        let paths = walk_markdown_paths(&self.root, &walk_options_for(&self.settings))
+            .map_err(io::Error::other)?;
+        let mut notes = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Ok(note) = NoteRecord::read(&self.root, path) {
+                notes.push(note);
+            }
+        }
+        self.notes = notes;
+        self.selected = (!self.notes.is_empty()).then_some(0);
+        self.rebuild_indexes();
+        Ok(())
     }
 
     fn parsed_notes(&self) -> Vec<MarkdownNote> {
@@ -246,9 +270,45 @@ impl SideromelaneApp {
         };
         let assets_dir = folder.root.join("assets");
         let Some(file_name) = source_path.file_name().and_then(|name| name.to_str()) else {
+            self.status = "Image dropped without a usable filename".into();
             return;
         };
-        let target_path = unique_asset_path(&assets_dir, file_name);
+
+        let safe_name = match sanitize_asset_filename(file_name) {
+            Ok(name) => name,
+            Err(error) => {
+                self.status = format!("Image rejected: {error}");
+                return;
+            }
+        };
+
+        match fs::metadata(source_path) {
+            Ok(metadata) if metadata.len() > MAX_IMAGE_BYTES => {
+                self.status = "Image too large (max 32 MiB)".into();
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.status = format!("Image stat failed: {error}");
+                return;
+            }
+        }
+
+        let mut header = [0_u8; 16];
+        let header_len = match read_image_header(source_path, &mut header) {
+            Ok(len) => len,
+            Err(error) => {
+                self.status = format!("Image read failed: {error}");
+                return;
+            }
+        };
+
+        if let Err(error) = validate_image_magic_bytes(&header[..header_len]) {
+            self.status = format!("Image rejected: {error}");
+            return;
+        }
+
+        let target_path = unique_asset_path(&assets_dir, &safe_name);
 
         match copy_asset(source_path, &target_path) {
             Ok(()) => {
@@ -347,6 +407,34 @@ impl SideromelaneApp {
         let Some(folder) = self.folder.as_mut() else {
             return;
         };
+
+        let mut settings_changed = false;
+        ui.collapsing("Folder settings", |ui| {
+            settings_changed |= ui
+                .checkbox(
+                    &mut folder.settings.ignore.include_dotfiles,
+                    "Include dotfiles",
+                )
+                .changed();
+            settings_changed |= ui
+                .checkbox(
+                    &mut folder.settings.ignore.honor_gitignore,
+                    "Honor .gitignore",
+                )
+                .changed();
+        });
+        if settings_changed {
+            match folder.settings.save(&folder.root) {
+                Ok(()) => match folder.rescan() {
+                    Ok(()) => {
+                        self.status = "Folder settings updated".into();
+                        self.active_block_index = None;
+                    }
+                    Err(error) => self.status = format!("Rescan failed: {error}"),
+                },
+                Err(error) => self.status = format!("Settings save failed: {error}"),
+            }
+        }
 
         ui.heading("Backlinks");
         if let Some(note) = folder.selected_note() {
@@ -747,22 +835,26 @@ fn select_note(folder: &mut FolderState, note_id: &NoteId) {
         .position(|note| &note.note_id == note_id);
 }
 
-fn collect_markdown_paths(root: &Path, paths: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_markdown_paths(&path, paths)?;
-        } else if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        {
-            paths.push(path);
-        }
+fn walk_options_for(settings: &FolderSettings) -> WalkOptions {
+    WalkOptions {
+        include_dotfiles: settings.ignore.include_dotfiles,
+        honor_gitignore: settings.ignore.honor_gitignore,
+        ..WalkOptions::default()
     }
+}
 
-    Ok(())
+fn read_image_header(path: &Path, buffer: &mut [u8; 16]) -> io::Result<usize> {
+    let file = File::open(path)?;
+    let mut reader = file.take(IMAGE_HEADER_PEEK);
+    let mut total = 0;
+    while total < buffer.len() {
+        let read = reader.read(&mut buffer[total..])?;
+        if read == 0 {
+            break;
+        }
+        total += read;
+    }
+    Ok(total)
 }
 
 fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
