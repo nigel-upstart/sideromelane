@@ -24,7 +24,7 @@ pub struct WalkOptions {
     pub honor_gitignore: bool,
     /// Additional ignore filenames the walker should consult.
     pub extra_ignore_files: Vec<PathBuf>,
-    /// Maximum directory depth. Defaults to [`DEFAULT_MAX_DEPTH`].
+    /// Maximum directory depth. Defaults to a depth of 64.
     pub max_depth: Option<usize>,
 }
 

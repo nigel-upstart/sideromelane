@@ -15,7 +15,7 @@ pub const IMAGE_MAGIC_BYTES_LEN: usize = 16;
 pub enum AssetNameError {
     /// The name is empty.
     Empty,
-    /// The name exceeds [`MAX_ASSET_NAME_LEN`] bytes.
+    /// The name exceeds 255 bytes.
     TooLong,
     /// The name is `.` or `..`.
     Reserved,
