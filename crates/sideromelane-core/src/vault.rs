@@ -1,0 +1,105 @@
+use std::ffi::OsStr;
+use std::fmt;
+use std::path::{Component, Path, PathBuf};
+
+/// Error returned when a path is not a safe vault-relative note path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultPathError {
+    /// The path is empty.
+    Empty,
+    /// The path is absolute or contains a platform prefix.
+    NotRelative,
+    /// The path contains `.` or `..` components.
+    UnsafeComponent,
+    /// The path does not identify a file name.
+    MissingFileName,
+    /// The path does not point to a Markdown note.
+    NotMarkdown,
+}
+
+impl fmt::Display for VaultPathError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Empty => "path is empty",
+            Self::NotRelative => "path must be relative to the vault",
+            Self::UnsafeComponent => "path contains an unsafe component",
+            Self::MissingFileName => "path must include a file name",
+            Self::NotMarkdown => "path must point to a Markdown note",
+        };
+
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for VaultPathError {}
+
+/// Stable identifier for a Markdown note inside a vault.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NoteId {
+    relative_path: PathBuf,
+}
+
+impl NoteId {
+    /// Builds a note identifier from a vault-relative Markdown path.
+    ///
+    /// The path must be relative, must not contain `.` or `..`, and must use an
+    /// `.md` extension.
+    pub fn from_vault_relative_path(path: impl Into<PathBuf>) -> Result<Self, VaultPathError> {
+        let relative_path = path.into();
+        validate_vault_note_path(&relative_path)?;
+
+        Ok(Self { relative_path })
+    }
+
+    /// Returns the vault-relative path for this note.
+    #[must_use]
+    pub fn relative_path(&self) -> &Path {
+        &self.relative_path
+    }
+
+    /// Returns the note file stem.
+    #[must_use]
+    pub fn file_stem(&self) -> &str {
+        self.relative_path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or_default()
+    }
+}
+
+fn validate_vault_note_path(path: &Path) -> Result<(), VaultPathError> {
+    if path.as_os_str().is_empty() {
+        return Err(VaultPathError::Empty);
+    }
+
+    if path.is_absolute() {
+        return Err(VaultPathError::NotRelative);
+    }
+
+    let mut has_normal_component = false;
+
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_normal_component = true,
+            Component::CurDir | Component::ParentDir => {
+                return Err(VaultPathError::UnsafeComponent);
+            }
+            Component::Prefix(_) | Component::RootDir => return Err(VaultPathError::NotRelative),
+        }
+    }
+
+    if !has_normal_component || path.file_name().is_none() {
+        return Err(VaultPathError::MissingFileName);
+    }
+
+    let is_markdown = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
+
+    if !is_markdown {
+        return Err(VaultPathError::NotMarkdown);
+    }
+
+    Ok(())
+}

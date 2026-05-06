@@ -1,5 +1,9 @@
 //! Core domain types for Sideromelane.
 
+mod vault;
+
+pub use vault::{NoteId, VaultPathError};
+
 /// Returns the current project name.
 #[must_use]
 pub const fn project_name() -> &'static str {
