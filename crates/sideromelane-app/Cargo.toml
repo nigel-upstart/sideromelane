@@ -21,3 +21,6 @@ workspace = true
 eframe            = "0.34.2"
 rfd               = "0.17.2"
 sideromelane-core = { path = "../sideromelane-core", version = "0.1.0" }
+
+[dev-dependencies]
+tempfile = "3.10"

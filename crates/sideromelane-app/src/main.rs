@@ -1,13 +1,17 @@
 #![allow(missing_docs, clippy::too_many_lines)]
 
+mod io;
+
 use std::fs;
-use std::io;
+use std::io as std_io;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Vec2};
 use sideromelane_core::{
     FolderIndex, HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId, SearchQuery,
 };
+
+use crate::io::safe_write;
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -94,7 +98,7 @@ struct FolderState {
 }
 
 impl FolderState {
-    fn load(root: PathBuf) -> io::Result<Self> {
+    fn load(root: PathBuf) -> std_io::Result<Self> {
         let mut paths = Vec::new();
         collect_markdown_paths(&root, &mut paths)?;
         paths.sort();
@@ -152,12 +156,13 @@ struct NoteRecord {
 }
 
 impl NoteRecord {
-    fn read(root: &Path, absolute_path: PathBuf) -> io::Result<Self> {
+    fn read(root: &Path, absolute_path: PathBuf) -> std_io::Result<Self> {
         let relative_path = absolute_path
             .strip_prefix(root)
-            .map_err(io::Error::other)?
+            .map_err(std_io::Error::other)?
             .to_path_buf();
-        let note_id = NoteId::from_folder_relative_path(relative_path).map_err(io::Error::other)?;
+        let note_id =
+            NoteId::from_folder_relative_path(relative_path).map_err(std_io::Error::other)?;
         let source = fs::read_to_string(&absolute_path)?;
 
         Ok(Self {
@@ -747,7 +752,7 @@ fn select_note(folder: &mut FolderState, note_id: &NoteId) {
         .position(|note| &note.note_id == note_id);
 }
 
-fn collect_markdown_paths(root: &Path, paths: &mut Vec<PathBuf>) -> io::Result<()> {
+fn collect_markdown_paths(root: &Path, paths: &mut Vec<PathBuf>) -> std_io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
@@ -782,16 +787,6 @@ fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
     }
 
     unreachable!("unbounded loop returns before exhausting usize");
-}
-
-fn safe_write(path: &Path, source: &str) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary_path = path.with_extension("md.tmp");
-
-    fs::write(&temporary_path, source)?;
-    fs::rename(temporary_path, path)
 }
 
 fn is_image_path(path: &Path) -> bool {
@@ -830,7 +825,7 @@ fn unique_asset_path(assets_dir: &Path, file_name: &str) -> PathBuf {
     unreachable!("unbounded loop returns before exhausting usize");
 }
 
-fn copy_asset(source_path: &Path, target_path: &Path) -> io::Result<()> {
+fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)?;
     }
