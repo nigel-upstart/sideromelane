@@ -5,7 +5,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Vec2};
-use sideromelane_core::{MarkdownNote, NoteAnalysis, NoteId, SearchIndex, SearchQuery, VaultIndex};
+use sideromelane_core::{
+    HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId, SearchQuery, VaultIndex,
+};
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -87,7 +89,7 @@ struct VaultState {
     root: PathBuf,
     notes: Vec<NoteRecord>,
     selected: Option<usize>,
-    search_index: SearchIndex,
+    search_index: HybridSearchIndex,
     vault_index: VaultIndex,
 }
 
@@ -105,7 +107,7 @@ impl VaultState {
             root,
             notes,
             selected: None,
-            search_index: SearchIndex::default(),
+            search_index: HybridSearchIndex::default(),
             vault_index: VaultIndex::default(),
         };
         vault.selected = (!vault.notes.is_empty()).then_some(0);
@@ -123,7 +125,7 @@ impl VaultState {
 
     fn rebuild_indexes(&mut self) {
         let notes = self.parsed_notes();
-        self.search_index = SearchIndex::from_notes(notes.clone());
+        self.search_index = HybridSearchIndex::from_notes(notes.clone());
         self.vault_index = VaultIndex::from_notes(notes);
     }
 
@@ -325,7 +327,11 @@ impl SideromelaneApp {
                     if ui
                         .selectable_label(
                             vault.selected == Some(index),
-                            format!("{} ({})", note.note_id.file_stem(), result.score()),
+                            format!(
+                                "{} ({:.1})",
+                                note.note_id.file_stem(),
+                                result.combined_score()
+                            ),
                         )
                         .clicked()
                     {

@@ -9,7 +9,10 @@ mod vault;
 pub use analysis::{Heading, ImageEmbed, NoteAnalysis, WikiLink};
 pub use index::{Backlink, Graph, GraphEdge, GraphNode, VaultIndex};
 pub use note::{Frontmatter, MarkdownNote, MetadataValue};
-pub use search::{SearchIndex, SearchQuery, SearchResult};
+pub use search::{
+    HybridSearchIndex, HybridSearchResult, SearchIndex, SearchQuery, SearchResult,
+    SemanticSearchIndex, SemanticSearchResult,
+};
 pub use vault::{NoteId, VaultPathError};
 
 /// Returns the current project name.
