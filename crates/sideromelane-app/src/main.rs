@@ -3,6 +3,7 @@
 mod indexer;
 mod io;
 mod outline;
+mod tree;
 
 use std::fs::{self, File};
 use std::io as std_io;
@@ -392,28 +393,57 @@ impl SideromelaneApp {
             return;
         };
 
+        // Auto-expand the path to the selected note on first render of this folder so
+        // the user lands on a tree where their current note is visible.
+        if let Some(selected_note) = folder
+            .selected
+            .and_then(|index| folder.notes.get(index))
+            .map(|record| record.note_id.clone())
+        {
+            for ancestor in tree::ancestor_paths(&selected_note) {
+                if !folder
+                    .settings
+                    .ui
+                    .tree_expanded_paths
+                    .iter()
+                    .any(|existing| existing == &ancestor)
+                {
+                    folder.settings.ui.tree_expanded_paths.push(ancestor);
+                }
+            }
+        }
+
         let mut selected_note = folder.selected;
+        let note_ids: Vec<NoteId> = folder
+            .notes
+            .iter()
+            .map(|record| record.note_id.clone())
+            .collect();
+        let folder_tree = tree::build_tree(&note_ids);
+        let mut tree_changed = false;
+
         egui::ScrollArea::vertical()
             .max_height(240.0)
+            .id_salt("files_tree")
             .show(ui, |ui| {
-                for (index, note) in folder.notes.iter().enumerate() {
-                    let label = if note.dirty {
-                        format!("{} *", note.note_id.relative_path().display())
-                    } else {
-                        note.note_id.relative_path().display().to_string()
-                    };
-                    if ui
-                        .selectable_label(selected_note == Some(index), label)
-                        .clicked()
-                    {
-                        selected_note = Some(index);
-                    }
+                for note_id in &folder_tree.root_notes {
+                    render_note_row(ui, folder, &mut selected_note, note_id, 0);
+                }
+                for subdir in &folder_tree.subdirs {
+                    render_dir(ui, folder, &mut selected_note, subdir, 0, &mut tree_changed);
                 }
             });
+
         if selected_note != folder.selected {
             folder.selected = selected_note;
             self.active_block_index = None;
         }
+
+        let pending_settings_save = if tree_changed {
+            Some(folder.root.clone())
+        } else {
+            None
+        };
 
         ui.separator();
         ui.heading("Search");
@@ -428,31 +458,42 @@ impl SideromelaneApp {
             SearchQuery::text(self.search_text.clone())
         };
         let results = folder.search_index.search(&query);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for result in results {
-                if let Some(index) = folder
-                    .notes
-                    .iter()
-                    .position(|note| &note.note_id == result.note_id())
-                {
-                    let note = &folder.notes[index];
-                    if ui
-                        .selectable_label(
-                            folder.selected == Some(index),
-                            format!(
-                                "{} ({:.1})",
-                                note.note_id.file_stem(),
-                                result.combined_score()
-                            ),
-                        )
-                        .clicked()
+        egui::ScrollArea::vertical()
+            .id_salt("search_results")
+            .show(ui, |ui| {
+                for result in results {
+                    if let Some(index) = folder
+                        .notes
+                        .iter()
+                        .position(|note| &note.note_id == result.note_id())
                     {
-                        folder.selected = Some(index);
-                        self.active_block_index = None;
+                        let note = &folder.notes[index];
+                        if ui
+                            .selectable_label(
+                                folder.selected == Some(index),
+                                format!(
+                                    "{} ({:.1})",
+                                    note.note_id.file_stem(),
+                                    result.combined_score()
+                                ),
+                            )
+                            .clicked()
+                        {
+                            folder.selected = Some(index);
+                            self.active_block_index = None;
+                        }
                     }
                 }
-            }
-        });
+            });
+
+        // Persist tree expansion state outside the folder borrow.
+        let _ = folder;
+        if let Some(root) = pending_settings_save
+            && let Some(folder) = self.folder.as_ref()
+            && let Err(error) = folder.settings.save(&root)
+        {
+            self.status = format!("Tree state save failed: {error}");
+        }
     }
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
@@ -944,6 +985,88 @@ fn select_note(folder: &mut FolderState, note_id: &NoteId) {
         .notes
         .iter()
         .position(|note| &note.note_id == note_id);
+}
+
+const TREE_INDENT_PER_LEVEL: f32 = 14.0;
+
+fn render_note_row(
+    ui: &mut egui::Ui,
+    folder: &FolderState,
+    selected_note: &mut Option<usize>,
+    note_id: &NoteId,
+    depth: usize,
+) {
+    let Some(index) = folder.notes.iter().position(|n| &n.note_id == note_id) else {
+        return;
+    };
+    let record = &folder.notes[index];
+    let label = if record.dirty {
+        format!("{} *", record.note_id.file_stem())
+    } else {
+        record.note_id.file_stem().to_owned()
+    };
+    ui.horizontal(|ui| {
+        #[allow(clippy::cast_precision_loss)]
+        ui.add_space(depth as f32 * TREE_INDENT_PER_LEVEL);
+        if ui
+            .selectable_label(*selected_note == Some(index), label)
+            .clicked()
+        {
+            *selected_note = Some(index);
+        }
+    });
+}
+
+fn render_dir(
+    ui: &mut egui::Ui,
+    folder: &mut FolderState,
+    selected_note: &mut Option<usize>,
+    dir: &tree::DirNode,
+    depth: usize,
+    tree_changed: &mut bool,
+) {
+    let expanded_index = folder
+        .settings
+        .ui
+        .tree_expanded_paths
+        .iter()
+        .position(|path| path == &dir.relative_path);
+    let mut expanded = expanded_index.is_some();
+
+    ui.horizontal(|ui| {
+        #[allow(clippy::cast_precision_loss)]
+        ui.add_space(depth as f32 * TREE_INDENT_PER_LEVEL);
+        let chevron = if expanded { "\u{25BE}" } else { "\u{25B8}" }; // ▾ / ▸
+        if ui
+            .button(format!("{chevron} \u{1F4C1} {}", dir.name))
+            .clicked()
+        {
+            expanded = !expanded;
+            *tree_changed = true;
+            if expanded {
+                if expanded_index.is_none() {
+                    folder
+                        .settings
+                        .ui
+                        .tree_expanded_paths
+                        .push(dir.relative_path.clone());
+                }
+            } else if let Some(index) = expanded_index {
+                folder.settings.ui.tree_expanded_paths.remove(index);
+            }
+        }
+    });
+
+    if !expanded {
+        return;
+    }
+
+    for note_id in &dir.notes {
+        render_note_row(ui, folder, selected_note, note_id, depth + 1);
+    }
+    for subdir in &dir.subdirs {
+        render_dir(ui, folder, selected_note, subdir, depth + 1, tree_changed);
+    }
 }
 
 fn walk_options_for(settings: &FolderSettings) -> WalkOptions {
