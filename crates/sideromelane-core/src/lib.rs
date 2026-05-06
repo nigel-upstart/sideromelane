@@ -1,8 +1,10 @@
 //! Core domain types for Sideromelane.
 
+mod analysis;
 mod note;
 mod vault;
 
+pub use analysis::{Heading, ImageEmbed, NoteAnalysis, WikiLink};
 pub use note::{Frontmatter, MarkdownNote, MetadataValue};
 pub use vault::{NoteId, VaultPathError};
 
