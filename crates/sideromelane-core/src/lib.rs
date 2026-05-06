@@ -1,7 +1,9 @@
 //! Core domain types for Sideromelane.
 
+mod note;
 mod vault;
 
+pub use note::{Frontmatter, MarkdownNote, MetadataValue};
 pub use vault::{NoteId, VaultPathError};
 
 /// Returns the current project name.
