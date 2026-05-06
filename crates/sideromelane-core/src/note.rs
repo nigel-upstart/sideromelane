@@ -108,6 +108,11 @@ impl Frontmatter {
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
+
+    /// Returns parsed frontmatter fields in deterministic key order.
+    pub fn fields(&self) -> impl Iterator<Item = (&str, &MetadataValue)> {
+        self.fields.iter().map(|(key, value)| (key.as_str(), value))
+    }
 }
 
 /// Simple frontmatter value supported by v1 core parsing.

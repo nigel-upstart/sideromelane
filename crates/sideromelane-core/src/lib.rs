@@ -3,11 +3,13 @@
 mod analysis;
 mod index;
 mod note;
+mod search;
 mod vault;
 
 pub use analysis::{Heading, ImageEmbed, NoteAnalysis, WikiLink};
 pub use index::{Backlink, Graph, GraphEdge, GraphNode, VaultIndex};
 pub use note::{Frontmatter, MarkdownNote, MetadataValue};
+pub use search::{SearchIndex, SearchQuery, SearchResult};
 pub use vault::{NoteId, VaultPathError};
 
 /// Returns the current project name.
