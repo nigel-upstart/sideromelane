@@ -1,6 +1,13 @@
-#![allow(missing_docs, clippy::unwrap_used)]
+#![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use sideromelane_core::{FolderIndex, MarkdownNote, NoteId};
+
+/// Fixture path helper.
+fn fixture(relative: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/folders")
+        .join(relative)
+}
 
 #[test]
 fn builds_backlinks_and_graph_edges_from_resolved_wiki_links() {
@@ -58,5 +65,46 @@ fn builds_backlinks_and_graph_edges_from_resolved_wiki_links() {
             ("Launch Plan", "Release Checklist"),
             ("Release Checklist", "Launch Plan"),
         ]
+    );
+}
+
+#[test]
+fn duplicate_stems_produce_non_empty_ambiguous_targets() {
+    // Load the duplicate-stems fixture folder.
+    let base = fixture("duplicate-stems");
+
+    // Build NoteIds and notes for all three fixture files.
+    let paths = [
+        ("a/Roadmap.md", "a/Roadmap.md"),
+        ("b/Roadmap.md", "b/Roadmap.md"),
+        ("Index.md", "Index.md"),
+    ];
+
+    let notes: Vec<MarkdownNote> = paths
+        .iter()
+        .map(|(rel, _)| {
+            let abs = base.join(rel);
+            let source = std::fs::read_to_string(&abs)
+                .unwrap_or_else(|_| panic!("fixture must exist: {}", abs.display()));
+            let note_id = NoteId::from_folder_relative_path(rel).unwrap();
+            MarkdownNote::parse(note_id, source)
+        })
+        .collect();
+
+    let index = FolderIndex::from_notes(notes);
+
+    let ambiguous = index.ambiguous_targets();
+    assert!(
+        !ambiguous.is_empty(),
+        "duplicate-stems fixture must produce non-empty ambiguous_targets()"
+    );
+    assert!(
+        ambiguous.contains_key("Roadmap"),
+        "ambiguous_targets() must contain 'Roadmap'; got: {ambiguous:?}"
+    );
+    assert_eq!(
+        ambiguous["Roadmap"].len(),
+        2,
+        "two notes share the 'Roadmap' stem"
     );
 }

@@ -2755,6 +2755,9 @@ dependencies = [
 [[package]]
 name = "sideromelane-core"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "signal-hook-registry"

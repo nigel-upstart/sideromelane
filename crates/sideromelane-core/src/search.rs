@@ -478,10 +478,13 @@ trait SearchableNotePath {
 
 impl SearchableNotePath for MarkdownNote {
     fn relative_search_path(&self) -> String {
+        // NoteId invariant: every path component is valid UTF-8, so `to_str` cannot fail.
+        #[allow(clippy::expect_used)]
         self.note_id()
             .relative_path()
-            .to_string_lossy()
-            .into_owned()
+            .to_str()
+            .expect("NoteId invariant: relative path is always valid UTF-8")
+            .to_owned()
     }
 }
 
