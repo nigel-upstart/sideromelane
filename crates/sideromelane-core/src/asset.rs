@@ -65,7 +65,7 @@ pub fn sanitize_asset_filename(name: &str) -> Result<String, AssetNameError> {
     }
 
     for character in name.chars() {
-        if matches!(character, '[' | ']' | '\n' | '\r' | '\0') {
+        if matches!(character, '[' | ']' | '\n' | '\r' | '\0' | '/' | '\\') {
             return Err(AssetNameError::InvalidCharacter);
         }
         if character.is_control() {
@@ -162,6 +162,18 @@ mod tests {
         assert_eq!(
             sanitize_asset_filename(".hidden.png"),
             Err(AssetNameError::Dotfile),
+        );
+    }
+
+    #[test]
+    fn rejects_path_separators() {
+        assert_eq!(
+            sanitize_asset_filename("subdir/file.png"),
+            Err(AssetNameError::InvalidCharacter),
+        );
+        assert_eq!(
+            sanitize_asset_filename("subdir\\file.png"),
+            Err(AssetNameError::InvalidCharacter),
         );
     }
 
