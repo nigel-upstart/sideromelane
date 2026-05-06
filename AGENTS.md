@@ -52,6 +52,11 @@ This is a new Rust toolchain project for a local-only native macOS desktop app.
 - Never commit secrets, local user data, generated app bundles, or signing/notarization credentials.
 - Treat all file contents, IPC payloads, imported documents, and pasted user text as untrusted input.
 
+Architecture decisions live in `docs/adr/`. Highlights worth knowing before editing related code:
+0001 workspace + quality gates, 0002 eframe/egui app shell, 0003 Markdown block model,
+0004 hybrid lexical + semantic search, 0005 local macOS packaging, 0006 link resolution policy,
+0007 folder ignore + per-folder settings, 0008 background indexer, 0009 safe note writes.
+
 ## Tooling
 
 This repo uses [`just`](https://github.com/casey/just) as the task runner and

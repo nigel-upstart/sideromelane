@@ -143,6 +143,16 @@ Do not add app/platform crates until the GUI/framework decision is accepted.
 A folder is a user-selected local root folder containing Markdown notes and assets. The app must keep
 the folder directly usable outside Sideromelane.
 
+The folder may also contain app-owned metadata that does not affect direct usability:
+
+- `.sideromelaneignore` — optional `.gitignore`-syntax file at the folder root that excludes paths
+  from indexing. See ADR 0007.
+- `.sideromelane/settings.json` — per-folder settings (ignore behavior, dotfile inclusion,
+  optional honoring of `.gitignore`). See ADR 0007.
+
+Default scan behavior excludes dotfiles, dotfolders, and the `.sideromelane/` directory itself. The
+defaults are user-toggleable per folder.
+
 ### Note
 
 A note is a `.md` file with optional YAML frontmatter followed by Markdown content.
@@ -172,9 +182,12 @@ it.
 
 ### Links
 
-Internal links use `[[Note Name]]`. Links resolve against notes in the folder using a deterministic
-resolution policy to be specified before implementation. Missing-note links are preserved and may be
-used to create a new note.
+Internal links use `[[Note Name]]`. Links resolve by case-sensitive comparison against note file
+stems. Ambiguous matches (multiple notes sharing a stem) are surfaced via
+`FolderIndex::ambiguous_targets()` for the UI to warn on, rather than silently picked. Missing-note
+links are preserved and may be used to create a new note. Wiki links may carry an alias
+(`[[Note|Display]]`) and an anchor (`[[Note#section]]`); both are preserved on the parsed link but
+do not influence resolution in v1. See ADR 0006.
 
 ### Assets
 
@@ -206,19 +219,22 @@ must stay behind explicit module boundaries.
 
 ## Background Work
 
-Startup must not block on indexing, embeddings, graph building, or search hydration. The app should
-open to an editable note first, then progressively update derived data.
+Startup must not block on indexing, embeddings, graph building, or search hydration. The app opens
+to an editable surface first (one initial note read shallowly), and a background indexer worker
+hydrates derived data eventually. See ADR 0008.
 
-Background systems:
+The indexer worker:
 
-- Watch or scan folder files.
-- Parse changed Markdown and frontmatter.
-- Extract links, tags, headings, and image references.
-- Update keyword search index.
-- Generate or refresh local embeddings.
-- Rebuild backlink and graph data incrementally.
+- Discovers Markdown files via `core::scan::walk_markdown_paths` honoring per-folder
+  `.sideromelaneignore` and dotfile/`.gitignore` settings.
+- Parses changed Markdown and frontmatter.
+- Extracts links, tags, headings, and image references.
+- Rebuilds keyword and semantic search indexes.
+- Rebuilds backlink and graph data.
 
-Partial search, backlink, and graph results are acceptable while warmup is in progress.
+The UI side is purely advisory: search, backlinks, and graph reads run against whatever indexes the
+app currently holds. They start empty, then become eventually consistent as `IndexUpdated` events
+arrive. Partial results are expected while warmup is in progress.
 
 ## Performance Targets
 
@@ -234,7 +250,12 @@ framework is selected.
 
 - Treat all folder files, frontmatter, Markdown, image names, IPC payloads, imported documents, and
   pasted text as untrusted input.
-- Prefer safe file writes that avoid truncating the only copy of a note.
+- Note writes are crash-safe: temp file → `sync_data` → rename → best-effort parent directory
+  `sync_all`. See ADR 0009.
+- Path components are required to round-trip through UTF-8; non-UTF-8 paths are rejected at
+  `NoteId` construction time so derived indexes cannot diverge from on-disk content.
+- Image drops are size-capped (32 MiB), magic-byte validated, and filename-sanitized before being
+  copied into the folder's assets directory.
 - Derived indexes must be rebuildable from the folder.
 - App crashes must not corrupt Markdown files.
 - No secrets, local user data, generated app bundles, or signing/notarization credentials belong in
@@ -333,11 +354,14 @@ Never:
 
 ## Open Questions
 
-1. What is the accepted app-shell or GUI framework for a Rust-first native macOS desktop app?
+1. ~~What is the accepted app-shell or GUI framework?~~ Resolved by ADR 0002 (eframe/egui).
 2. Should the shippable v1 require signing and notarization, or is a local unsigned app bundle
    acceptable?
 3. What is the default folder assets directory and collision policy for dropped images?
-4. How should duplicate note titles or duplicate stem names resolve for `[[Note Name]]` links?
-5. What Markdown dialect is authoritative for tables, task lists, code fences, and wiki embeds?
-6. What local embedding model/runtime and vector storage are acceptable for v1?
+4. ~~How should duplicate note titles or duplicate stem names resolve?~~ Resolved by ADR 0006
+   (ambiguous matches surfaced, not silently picked).
+5. ~~What Markdown dialect is authoritative for tables, task lists, code fences, and wiki embeds?~~
+   Resolved by ADR 0003 (internal v1 block model; pulldown-cmark deferred).
+6. What local embedding model/runtime and vector storage are acceptable for v1? (ADR 0004 ships a
+   hashed-token-vector baseline; a model-backed runtime requires its own ADR.)
 7. What folder size should v1 performance targets be measured against?
