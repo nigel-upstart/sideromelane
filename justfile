@@ -28,6 +28,9 @@ doc:
 
 check: fmt-check lint test doc
 
+package:
+    ./scripts/package-macos-app.sh
+
 audit:
     cargo deny check
     cargo machete

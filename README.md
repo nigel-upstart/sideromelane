@@ -23,6 +23,12 @@ just test
 just check
 ```
 
+Build a local unsigned macOS app bundle:
+
+```sh
+just package
+```
+
 Optional quality tools are documented in `docs/rust-quality.md`.
 
 ## Git Hooks
