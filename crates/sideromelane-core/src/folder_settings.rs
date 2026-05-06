@@ -45,6 +45,10 @@ impl Default for FolderSettings {
 }
 
 /// Walker ignore configuration controlled by the user from the folder UI.
+///
+/// Additional glob support beyond `.sideromelaneignore` itself is intentionally not
+/// exposed in v1: users edit `.sideromelaneignore` directly. Unknown ignore-related
+/// fields written by future schema versions round-trip via [`FolderSettings::extra`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IgnoreSettings {
     /// Whether `.gitignore` files should also be honored when walking.
@@ -53,9 +57,6 @@ pub struct IgnoreSettings {
     /// Whether dotfiles and dotfolders are surfaced.
     #[serde(default)]
     pub include_dotfiles: bool,
-    /// Additional ignore globs applied on top of `.sideromelaneignore`.
-    #[serde(default)]
-    pub extra_globs: Vec<String>,
 }
 
 const fn default_version() -> u32 {
@@ -190,7 +191,6 @@ mod tests {
         assert_eq!(settings.version, 1);
         assert!(!settings.ignore.honor_gitignore);
         assert!(!settings.ignore.include_dotfiles);
-        assert!(settings.ignore.extra_globs.is_empty());
         assert!(settings.extra.is_empty());
     }
 
@@ -200,13 +200,11 @@ mod tests {
         let mut settings = FolderSettings::default();
         settings.ignore.honor_gitignore = true;
         settings.ignore.include_dotfiles = true;
-        settings.ignore.extra_globs.push("Drafts/".into());
 
         settings.save(dir.path()).expect("save ok");
         let loaded = FolderSettings::load(dir.path()).expect("load ok");
         assert!(loaded.ignore.honor_gitignore);
         assert!(loaded.ignore.include_dotfiles);
-        assert_eq!(loaded.ignore.extra_globs, vec!["Drafts/".to_string()]);
     }
 
     #[test]
@@ -218,8 +216,7 @@ mod tests {
             "version": 1,
             "ignore": {
                 "honor_gitignore": true,
-                "include_dotfiles": false,
-                "extra_globs": []
+                "include_dotfiles": false
             },
             "future_field": {"hello": "world"}
         });
