@@ -2,6 +2,7 @@
 
 mod indexer;
 mod io;
+mod outline;
 
 use std::fs::{self, File};
 use std::io as std_io;
@@ -516,12 +517,26 @@ impl SideromelaneApp {
         ui.heading("Outline");
         if let Some(parsed_note) = folder.selected_parsed_note() {
             let analysis = NoteAnalysis::from_note(&parsed_note);
+            let base_font = ui
+                .style()
+                .text_styles
+                .get(&egui::TextStyle::Body)
+                .map_or(14.0, |id| id.size);
             for heading in analysis.headings() {
-                ui.label(format!(
-                    "{} {}",
-                    "#".repeat(usize::from(heading.level())),
-                    heading.text()
-                ));
+                let display = outline::display_heading_text(heading.text());
+                if display.is_empty() {
+                    continue;
+                }
+                let level = heading.level();
+                ui.horizontal(|ui| {
+                    ui.add_space(outline::heading_indent_px(level));
+                    let mut rich = egui::RichText::new(display)
+                        .size(outline::heading_font_size(level, base_font));
+                    if outline::heading_is_bold(level) {
+                        rich = rich.strong();
+                    }
+                    ui.label(rich);
+                });
             }
         }
 
