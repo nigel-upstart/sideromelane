@@ -1,5 +1,7 @@
 #![allow(missing_docs, clippy::too_many_lines)]
 
+mod graph_layout;
+mod graph_view;
 mod indexer;
 mod io;
 mod outline;
@@ -10,7 +12,7 @@ use std::io as std_io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Vec2};
+use eframe::egui::{self, Sense};
 use sideromelane_core::{
     FolderIndex, FolderSettings, HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId,
     SearchQuery, WalkOptions, sanitize_asset_filename, validate_image_magic_bytes,
@@ -50,6 +52,7 @@ struct SideromelaneApp {
     active_block_index: Option<usize>,
     status: String,
     indexer: Option<Indexer>,
+    graph_view: graph_view::GraphViewState,
 }
 
 impl eframe::App for SideromelaneApp {
@@ -583,7 +586,17 @@ impl SideromelaneApp {
 
         ui.separator();
         ui.heading("Graph");
-        draw_graph(ui, folder);
+        let selected_note = folder.selected_note().map(|note| note.note_id.clone());
+        let clicked = graph_view::draw(
+            ui,
+            &mut self.graph_view,
+            &folder.folder_index,
+            selected_note.as_ref(),
+        );
+        if let Some(note_id) = clicked {
+            select_note(folder, &note_id);
+            self.active_block_index = None;
+        }
 
         // Folder borrow ends with this scope; perform any deferred rescan
         // dispatch now that we can take a fresh `&mut self` borrow.
@@ -902,82 +915,6 @@ fn preview_text(source: &str) -> String {
         .replace("- [ ]", "[ ]")
         .replace("- [x]", "[x]")
         .replace("- [X]", "[x]")
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn draw_graph(ui: &mut egui::Ui, folder: &mut FolderState) {
-    let desired_size = Vec2::new(ui.available_width(), 220.0);
-    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
-    let painter = ui.painter_at(rect);
-    let graph = folder.folder_index.graph();
-    let nodes = graph.nodes();
-
-    if nodes.is_empty() {
-        return;
-    }
-
-    let center = rect.center();
-    let radius = rect.width().min(rect.height()) * 0.38;
-    let positions = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| {
-            let angle = index as f32 / nodes.len() as f32 * std::f32::consts::TAU;
-            let position = Pos2::new(
-                center.x + radius * angle.cos(),
-                center.y + radius * angle.sin(),
-            );
-            (node.note_id().clone(), position)
-        })
-        .collect::<Vec<_>>();
-
-    for edge in graph.edges() {
-        let Some(source) = positions
-            .iter()
-            .find(|(note_id, _position)| note_id == edge.source())
-            .map(|(_note_id, position)| *position)
-        else {
-            continue;
-        };
-        let Some(target) = positions
-            .iter()
-            .find(|(note_id, _position)| note_id == edge.target())
-            .map(|(_note_id, position)| *position)
-        else {
-            continue;
-        };
-        painter.line_segment([source, target], Stroke::new(1.0, Color32::DARK_GRAY));
-    }
-
-    let selected_note = folder.selected_note().map(|note| note.note_id.clone());
-    for (note_id, position) in &positions {
-        let is_selected = selected_note.as_ref() == Some(note_id);
-        painter.circle_filled(
-            *position,
-            if is_selected { 8.0 } else { 6.0 },
-            if is_selected {
-                Color32::from_rgb(180, 70, 70)
-            } else {
-                Color32::from_rgb(70, 110, 160)
-            },
-        );
-        painter.text(
-            *position + Vec2::new(8.0, -6.0),
-            egui::Align2::LEFT_TOP,
-            note_id.file_stem(),
-            egui::FontId::proportional(11.0),
-            Color32::WHITE,
-        );
-    }
-
-    if response.clicked()
-        && let Some(pointer) = response.interact_pointer_pos()
-        && let Some((note_id, _position)) = positions
-            .iter()
-            .find(|(_note_id, position)| position.distance(pointer) <= 14.0)
-    {
-        select_note(folder, note_id);
-    }
 }
 
 fn select_note(folder: &mut FolderState, note_id: &NoteId) {
