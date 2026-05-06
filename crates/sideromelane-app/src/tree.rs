@@ -24,9 +24,8 @@ pub struct DirNode {
 
 /// Builds a directory tree from a flat list of `NoteId`s.
 ///
-/// The returned vector is the root's direct children: subdirectories first,
-/// then notes that live at the folder root (those go into [`Tree::root_notes`]
-/// in [`build_tree_full`]).
+/// The returned [`Tree`] holds the root's direct children: subdirectories
+/// (sorted by name) and notes that sit at the folder root (sorted by stem).
 #[must_use]
 pub fn build_tree(notes: &[NoteId]) -> Tree {
     let mut root_dirs: BTreeMap<String, DirNode> = BTreeMap::new();
