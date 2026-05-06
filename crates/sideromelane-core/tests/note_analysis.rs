@@ -4,7 +4,7 @@ use sideromelane_core::{ImageEmbed, MarkdownNote, NoteAnalysis, NoteId, WikiLink
 
 #[test]
 fn extracts_headings_links_and_image_embeds_from_note_body() {
-    let note_id = NoteId::from_vault_relative_path("plans/Launch Plan.md").unwrap();
+    let note_id = NoteId::from_folder_relative_path("plans/Launch Plan.md").unwrap();
     let note = MarkdownNote::parse(
         note_id,
         r"---

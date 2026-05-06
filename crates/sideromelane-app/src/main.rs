@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Vec2};
 use sideromelane_core::{
-    HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId, SearchQuery, VaultIndex,
+    FolderIndex, HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId, SearchQuery,
 };
 
 fn main() -> eframe::Result {
@@ -26,7 +26,7 @@ fn main() -> eframe::Result {
 
 #[derive(Debug, Default)]
 struct SideromelaneApp {
-    vault: Option<VaultState>,
+    folder: Option<FolderState>,
     mode: EditorMode,
     search_text: String,
     active_block_index: Option<usize>,
@@ -39,18 +39,18 @@ impl eframe::App for SideromelaneApp {
 
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open Vault").clicked() {
-                    self.pick_vault();
+                if ui.button("Open Folder").clicked() {
+                    self.pick_folder();
                 }
-                let can_use_vault = self.vault.is_some();
+                let can_use_folder = self.folder.is_some();
                 if ui
-                    .add_enabled(can_use_vault, egui::Button::new("New"))
+                    .add_enabled(can_use_folder, egui::Button::new("New"))
                     .clicked()
                 {
                     self.new_note();
                 }
                 if ui
-                    .add_enabled(can_use_vault, egui::Button::new("Save"))
+                    .add_enabled(can_use_folder, egui::Button::new("Save"))
                     .clicked()
                 {
                     self.save_selected();
@@ -85,15 +85,15 @@ enum EditorMode {
 }
 
 #[derive(Debug)]
-struct VaultState {
+struct FolderState {
     root: PathBuf,
     notes: Vec<NoteRecord>,
     selected: Option<usize>,
     search_index: HybridSearchIndex,
-    vault_index: VaultIndex,
+    folder_index: FolderIndex,
 }
 
-impl VaultState {
+impl FolderState {
     fn load(root: PathBuf) -> io::Result<Self> {
         let mut paths = Vec::new();
         collect_markdown_paths(&root, &mut paths)?;
@@ -103,17 +103,17 @@ impl VaultState {
             .into_iter()
             .filter_map(|path| NoteRecord::read(&root, path).ok())
             .collect::<Vec<_>>();
-        let mut vault = Self {
+        let mut folder = Self {
             root,
             notes,
             selected: None,
             search_index: HybridSearchIndex::default(),
-            vault_index: VaultIndex::default(),
+            folder_index: FolderIndex::default(),
         };
-        vault.selected = (!vault.notes.is_empty()).then_some(0);
-        vault.rebuild_indexes();
+        folder.selected = (!folder.notes.is_empty()).then_some(0);
+        folder.rebuild_indexes();
 
-        Ok(vault)
+        Ok(folder)
     }
 
     fn parsed_notes(&self) -> Vec<MarkdownNote> {
@@ -126,7 +126,7 @@ impl VaultState {
     fn rebuild_indexes(&mut self) {
         let notes = self.parsed_notes();
         self.search_index = HybridSearchIndex::from_notes(notes.clone());
-        self.vault_index = VaultIndex::from_notes(notes);
+        self.folder_index = FolderIndex::from_notes(notes);
     }
 
     fn selected_note(&self) -> Option<&NoteRecord> {
@@ -157,7 +157,7 @@ impl NoteRecord {
             .strip_prefix(root)
             .map_err(io::Error::other)?
             .to_path_buf();
-        let note_id = NoteId::from_vault_relative_path(relative_path).map_err(io::Error::other)?;
+        let note_id = NoteId::from_folder_relative_path(relative_path).map_err(io::Error::other)?;
         let source = fs::read_to_string(&absolute_path)?;
 
         Ok(Self {
@@ -170,19 +170,19 @@ impl NoteRecord {
 }
 
 impl SideromelaneApp {
-    fn pick_vault(&mut self) {
+    fn pick_folder(&mut self) {
         let Some(root) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
 
-        self.open_vault(root);
+        self.open_folder(root);
     }
 
-    fn open_vault(&mut self, root: PathBuf) {
-        match VaultState::load(root) {
-            Ok(vault) => {
-                self.status = format!("Opened {}", vault.root.display());
-                self.vault = Some(vault);
+    fn open_folder(&mut self, root: PathBuf) {
+        match FolderState::load(root) {
+            Ok(folder) => {
+                self.status = format!("Opened {}", folder.root.display());
+                self.folder = Some(folder);
                 self.active_block_index = None;
             }
             Err(error) => self.status = format!("Open failed: {error}"),
@@ -190,27 +190,27 @@ impl SideromelaneApp {
     }
 
     fn new_note(&mut self) {
-        let Some(vault) = self.vault.as_mut() else {
+        let Some(folder) = self.folder.as_mut() else {
             return;
         };
-        let (note_id, absolute_path) = next_untitled_note(&vault.root);
+        let (note_id, absolute_path) = next_untitled_note(&folder.root);
         let source = format!("# {}\n", note_id.file_stem());
-        vault.notes.push(NoteRecord {
+        folder.notes.push(NoteRecord {
             note_id,
             absolute_path,
             source,
             dirty: true,
         });
-        vault.selected = Some(vault.notes.len() - 1);
-        vault.rebuild_indexes();
+        folder.selected = Some(folder.notes.len() - 1);
+        folder.rebuild_indexes();
         self.active_block_index = None;
     }
 
     fn save_selected(&mut self) {
-        let Some(vault) = self.vault.as_mut() else {
+        let Some(folder) = self.folder.as_mut() else {
             return;
         };
-        let Some(note) = vault.selected_note_mut() else {
+        let Some(note) = folder.selected_note_mut() else {
             return;
         };
 
@@ -218,7 +218,7 @@ impl SideromelaneApp {
             Ok(()) => {
                 note.dirty = false;
                 self.status = format!("Saved {}", note.note_id.relative_path().display());
-                vault.rebuild_indexes();
+                folder.rebuild_indexes();
             }
             Err(error) => self.status = format!("Save failed: {error}"),
         }
@@ -241,10 +241,10 @@ impl SideromelaneApp {
     }
 
     fn insert_image_embed(&mut self, source_path: &Path) {
-        let Some(vault) = self.vault.as_mut() else {
+        let Some(folder) = self.folder.as_mut() else {
             return;
         };
-        let assets_dir = vault.root.join("assets");
+        let assets_dir = folder.root.join("assets");
         let Some(file_name) = source_path.file_name().and_then(|name| name.to_str()) else {
             return;
         };
@@ -253,11 +253,11 @@ impl SideromelaneApp {
         match copy_asset(source_path, &target_path) {
             Ok(()) => {
                 let relative_target = target_path
-                    .strip_prefix(&vault.root)
+                    .strip_prefix(&folder.root)
                     .unwrap_or(&target_path)
                     .to_string_lossy()
                     .into_owned();
-                let Some(note) = vault.selected_note_mut() else {
+                let Some(note) = folder.selected_note_mut() else {
                     return;
                 };
                 note.source.push('\n');
@@ -266,7 +266,7 @@ impl SideromelaneApp {
                 note.source.push_str("]]\n");
                 note.dirty = true;
                 self.status = format!("Inserted {relative_target}");
-                vault.rebuild_indexes();
+                folder.rebuild_indexes();
             }
             Err(error) => self.status = format!("Image copy failed: {error}"),
         }
@@ -274,15 +274,15 @@ impl SideromelaneApp {
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Files");
-        let Some(vault) = self.vault.as_mut() else {
+        let Some(folder) = self.folder.as_mut() else {
             return;
         };
 
-        let mut selected_note = vault.selected;
+        let mut selected_note = folder.selected;
         egui::ScrollArea::vertical()
             .max_height(240.0)
             .show(ui, |ui| {
-                for (index, note) in vault.notes.iter().enumerate() {
+                for (index, note) in folder.notes.iter().enumerate() {
                     let label = if note.dirty {
                         format!("{} *", note.note_id.relative_path().display())
                     } else {
@@ -296,8 +296,8 @@ impl SideromelaneApp {
                     }
                 }
             });
-        if selected_note != vault.selected {
-            vault.selected = selected_note;
+        if selected_note != folder.selected {
+            folder.selected = selected_note;
             self.active_block_index = None;
         }
 
@@ -307,7 +307,7 @@ impl SideromelaneApp {
             .add(egui::TextEdit::singleline(&mut self.search_text).hint_text("Search"))
             .changed();
         if search_changed {
-            vault.rebuild_indexes();
+            folder.rebuild_indexes();
         }
 
         let query = if self.search_text.trim().is_empty() {
@@ -315,18 +315,18 @@ impl SideromelaneApp {
         } else {
             SearchQuery::text(self.search_text.clone())
         };
-        let results = vault.search_index.search(&query);
+        let results = folder.search_index.search(&query);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for result in results {
-                if let Some(index) = vault
+                if let Some(index) = folder
                     .notes
                     .iter()
                     .position(|note| &note.note_id == result.note_id())
                 {
-                    let note = &vault.notes[index];
+                    let note = &folder.notes[index];
                     if ui
                         .selectable_label(
-                            vault.selected == Some(index),
+                            folder.selected == Some(index),
                             format!(
                                 "{} ({:.1})",
                                 note.note_id.file_stem(),
@@ -335,7 +335,7 @@ impl SideromelaneApp {
                         )
                         .clicked()
                     {
-                        vault.selected = Some(index);
+                        folder.selected = Some(index);
                         self.active_block_index = None;
                     }
                 }
@@ -344,21 +344,21 @@ impl SideromelaneApp {
     }
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
-        let Some(vault) = self.vault.as_mut() else {
+        let Some(folder) = self.folder.as_mut() else {
             return;
         };
 
         ui.heading("Backlinks");
-        if let Some(note) = vault.selected_note() {
-            let backlink_sources = vault
-                .vault_index
+        if let Some(note) = folder.selected_note() {
+            let backlink_sources = folder
+                .folder_index
                 .backlinks_to(&note.note_id)
                 .iter()
                 .map(|backlink| backlink.source().clone())
                 .collect::<Vec<_>>();
             for source in backlink_sources {
                 if ui.button(source.file_stem()).clicked() {
-                    select_note(vault, &source);
+                    select_note(folder, &source);
                     self.active_block_index = None;
                 }
             }
@@ -366,7 +366,7 @@ impl SideromelaneApp {
 
         ui.separator();
         ui.heading("Outline");
-        if let Some(parsed_note) = vault.selected_parsed_note() {
+        if let Some(parsed_note) = folder.selected_parsed_note() {
             let analysis = NoteAnalysis::from_note(&parsed_note);
             for heading in analysis.headings() {
                 ui.label(format!(
@@ -379,17 +379,17 @@ impl SideromelaneApp {
 
         ui.separator();
         ui.heading("Graph");
-        draw_graph(ui, vault);
+        draw_graph(ui, folder);
     }
 
     fn main_panel(&mut self, ui: &mut egui::Ui) {
-        let Some(vault) = self.vault.as_mut() else {
+        let Some(folder) = self.folder.as_mut() else {
             ui.centered_and_justified(|ui| {
                 ui.heading("Sideromelane");
             });
             return;
         };
-        let Some(index) = vault.selected else {
+        let Some(index) = folder.selected else {
             ui.centered_and_justified(|ui| {
                 ui.heading("No Notes");
             });
@@ -397,7 +397,7 @@ impl SideromelaneApp {
         };
 
         ui.horizontal(|ui| {
-            let note = &vault.notes[index];
+            let note = &folder.notes[index];
             ui.heading(note.note_id.file_stem());
             if note.dirty {
                 ui.label("Unsaved");
@@ -406,15 +406,15 @@ impl SideromelaneApp {
         ui.separator();
 
         let changed = match self.mode {
-            EditorMode::Raw => raw_editor(ui, &mut vault.notes[index]),
+            EditorMode::Raw => raw_editor(ui, &mut folder.notes[index]),
             EditorMode::LivePreview => {
-                live_preview_editor(ui, &mut vault.notes[index], &mut self.active_block_index)
+                live_preview_editor(ui, &mut folder.notes[index], &mut self.active_block_index)
             }
         };
 
         if changed {
-            vault.notes[index].dirty = true;
-            vault.rebuild_indexes();
+            folder.notes[index].dirty = true;
+            folder.rebuild_indexes();
         }
     }
 }
@@ -665,11 +665,11 @@ fn preview_text(source: &str) -> String {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn draw_graph(ui: &mut egui::Ui, vault: &mut VaultState) {
+fn draw_graph(ui: &mut egui::Ui, folder: &mut FolderState) {
     let desired_size = Vec2::new(ui.available_width(), 220.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
     let painter = ui.painter_at(rect);
-    let graph = vault.vault_index.graph();
+    let graph = folder.folder_index.graph();
     let nodes = graph.nodes();
 
     if nodes.is_empty() {
@@ -709,7 +709,7 @@ fn draw_graph(ui: &mut egui::Ui, vault: &mut VaultState) {
         painter.line_segment([source, target], Stroke::new(1.0, Color32::DARK_GRAY));
     }
 
-    let selected_note = vault.selected_note().map(|note| note.note_id.clone());
+    let selected_note = folder.selected_note().map(|note| note.note_id.clone());
     for (note_id, position) in &positions {
         let is_selected = selected_note.as_ref() == Some(note_id);
         painter.circle_filled(
@@ -736,12 +736,15 @@ fn draw_graph(ui: &mut egui::Ui, vault: &mut VaultState) {
             .iter()
             .find(|(_note_id, position)| position.distance(pointer) <= 14.0)
     {
-        select_note(vault, note_id);
+        select_note(folder, note_id);
     }
 }
 
-fn select_note(vault: &mut VaultState, note_id: &NoteId) {
-    vault.selected = vault.notes.iter().position(|note| &note.note_id == note_id);
+fn select_note(folder: &mut FolderState, note_id: &NoteId) {
+    folder.selected = folder
+        .notes
+        .iter()
+        .position(|note| &note.note_id == note_id);
 }
 
 fn collect_markdown_paths(root: &Path, paths: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -772,7 +775,7 @@ fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
         let absolute_path = root.join(&file_name);
 
         if !absolute_path.exists()
-            && let Ok(note_id) = NoteId::from_vault_relative_path(PathBuf::from(file_name))
+            && let Ok(note_id) = NoteId::from_folder_relative_path(PathBuf::from(file_name))
         {
             return (note_id, absolute_path);
         }

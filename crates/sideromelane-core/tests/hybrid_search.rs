@@ -4,8 +4,8 @@ use sideromelane_core::{HybridSearchIndex, MarkdownNote, NoteId, SearchQuery};
 
 #[test]
 fn hybrid_search_includes_local_semantic_matches_without_exact_keywords() {
-    let credit_id = NoteId::from_vault_relative_path("credit/Loan Review.md").unwrap();
-    let garden_id = NoteId::from_vault_relative_path("garden/Planting.md").unwrap();
+    let credit_id = NoteId::from_folder_relative_path("credit/Loan Review.md").unwrap();
+    let garden_id = NoteId::from_folder_relative_path("garden/Planting.md").unwrap();
 
     let credit = MarkdownNote::parse(
         credit_id.clone(),

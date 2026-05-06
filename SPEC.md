@@ -21,7 +21,7 @@ questions are accepted or corrected.
 ## Objective
 
 Build a packageable, shippable Markdown knowledge workspace for local notes. The app enables a user
-to create, edit, browse, tag, link, search, and visualize Markdown notes stored in a local vault.
+to create, edit, browse, tag, link, search, and visualize Markdown notes stored in a local folder.
 
 The primary user is someone who wants Obsidian-like core primitives without a plugin ecosystem,
 theme system, sync service, or proprietary storage format.
@@ -33,7 +33,7 @@ let indexing, backlinks, graph data, and semantic search hydrate progressively i
 
 ### Must Have
 
-- Local vault selection and file browsing for Markdown notes and image assets.
+- Local folder selection and file browsing for Markdown notes and image assets.
 - Markdown note creation, editing, and safe persistence to disk.
 - Two note modes:
   - Raw view: plain Markdown source, including YAML frontmatter.
@@ -44,7 +44,7 @@ let indexing, backlinks, graph data, and semantic search hydrate progressively i
 - Link resolution and navigation between notes.
 - Backlinks panel that lists notes linking to the current note.
 - Markdown rendering for headings, lists, checkboxes, links, tables, inline images, and code blocks.
-- Image drag-and-drop into the vault assets area with insertion as `![[image.png]]`.
+- Image drag-and-drop into the folder assets area with insertion as `![[image.png]]`.
 - Keyword search across file name, title, content, links, tags, and frontmatter.
 - Local semantic search using embeddings, with background indexing and eventual consistency.
 - Graph view where notes are nodes and links are edges.
@@ -127,10 +127,10 @@ scripts/                   Local developer automation.
 Expected future structure after the GUI ADR:
 
 ```text
-crates/sideromelane-core/      Vault, note, link, metadata, index, and graph domain logic.
+crates/sideromelane-core/      Folder, note, link, metadata, index, and graph domain logic.
 crates/sideromelane-app/       Application orchestration and desktop shell boundary.
 crates/sideromelane-macos/     Narrow macOS platform adapters, if needed.
-tests/fixtures/vaults/         Small sample vaults for integration tests.
+tests/fixtures/folders/         Small sample folders for integration tests.
 docs/adr/                      GUI, packaging, storage, and embedding decisions.
 ```
 
@@ -138,9 +138,9 @@ Do not add app/platform crates until the GUI/framework decision is accepted.
 
 ## Core Model
 
-### Vault
+### Folder
 
-A vault is a user-selected local root folder containing Markdown notes and assets. The app must keep
+A folder is a user-selected local root folder containing Markdown notes and assets. The app must keep
 the folder directly usable outside Sideromelane.
 
 ### Note
@@ -172,13 +172,13 @@ it.
 
 ### Links
 
-Internal links use `[[Note Name]]`. Links resolve against notes in the vault using a deterministic
+Internal links use `[[Note Name]]`. Links resolve against notes in the folder using a deterministic
 resolution policy to be specified before implementation. Missing-note links are preserved and may be
 used to create a new note.
 
 ### Assets
 
-Images are stored under a vault-local assets location. The default location should be predictable,
+Images are stored under a folder-local assets location. The default location should be predictable,
 for example `assets/`, but the exact naming and collision policy must be specified before
 implementation.
 
@@ -190,7 +190,7 @@ The app is organized around pure core services and narrow adapters:
 Desktop UI
   -> App orchestration
     -> Core engine
-      -> Vault manager
+      -> Folder manager
       -> Markdown/frontmatter parser
       -> Link resolver
       -> Indexer
@@ -211,7 +211,7 @@ open to an editable note first, then progressively update derived data.
 
 Background systems:
 
-- Watch or scan vault files.
+- Watch or scan folder files.
 - Parse changed Markdown and frontmatter.
 - Extract links, tags, headings, and image references.
 - Update keyword search index.
@@ -232,10 +232,10 @@ framework is selected.
 
 ## Data Integrity
 
-- Treat all vault files, frontmatter, Markdown, image names, IPC payloads, imported documents, and
+- Treat all folder files, frontmatter, Markdown, image names, IPC payloads, imported documents, and
   pasted text as untrusted input.
 - Prefer safe file writes that avoid truncating the only copy of a note.
-- Derived indexes must be rebuildable from the vault.
+- Derived indexes must be rebuildable from the folder.
 - App crashes must not corrupt Markdown files.
 - No secrets, local user data, generated app bundles, or signing/notarization credentials belong in
   the repository.
@@ -254,7 +254,7 @@ pub struct NoteId {
 
 impl NoteId {
     #[must_use]
-    pub fn from_vault_relative_path(relative_path: PathBuf) -> Self {
+    pub fn from_folder_relative_path(relative_path: PathBuf) -> Self {
         Self { relative_path }
     }
 
@@ -267,7 +267,7 @@ impl NoteId {
 
 Conventions:
 
-- Prefer domain names such as `Vault`, `Note`, `Frontmatter`, `WikiLink`, `Backlink`, and
+- Prefer domain names such as `Folder`, `Note`, `Frontmatter`, `WikiLink`, `Backlink`, and
   `GraphEdge`.
 - Keep parsing, indexing, and filesystem effects separated.
 - Return typed errors at boundaries instead of panicking.
@@ -278,7 +278,7 @@ Conventions:
 
 - Unit tests live near the code they verify.
 - Integration tests live under each crate's `tests/` directory.
-- Fixture vaults should cover valid Markdown, malformed frontmatter, duplicate note names, broken
+- Fixture folders should cover valid Markdown, malformed frontmatter, duplicate note names, broken
   links, image references, and large-enough notes to catch obvious latency regressions.
 - Core tests should verify parsing, link extraction, backlink generation, metadata extraction,
   graph construction, search ranking inputs, and safe write behavior.
@@ -316,13 +316,13 @@ Never:
 
 ## Success Criteria
 
-- A user can create and edit Markdown notes in a local vault.
+- A user can create and edit Markdown notes in a local folder.
 - A user can switch between raw and live preview modes.
 - In live preview, inactive Markdown lines or blocks are rendered, and the active cursor line or
   block remains editable Markdown source.
 - YAML frontmatter is visible in raw mode and cleanly displayed as editable metadata in live preview.
 - `[[Note Name]]` links resolve, navigate, and generate backlinks.
-- Dragged images are copied into the vault and rendered inline as wiki image embeds.
+- Dragged images are copied into the folder and rendered inline as wiki image embeds.
 - Keyword search works over note text, titles, tags, links, file names, and frontmatter.
 - Semantic search returns local embedding-based matches without required network calls.
 - Search and graph data hydrate in the background without blocking initial editing.
@@ -336,8 +336,8 @@ Never:
 1. What is the accepted app-shell or GUI framework for a Rust-first native macOS desktop app?
 2. Should the shippable v1 require signing and notarization, or is a local unsigned app bundle
    acceptable?
-3. What is the default vault assets directory and collision policy for dropped images?
+3. What is the default folder assets directory and collision policy for dropped images?
 4. How should duplicate note titles or duplicate stem names resolve for `[[Note Name]]` links?
 5. What Markdown dialect is authoritative for tables, task lists, code fences, and wiki embeds?
 6. What local embedding model/runtime and vector storage are acceptable for v1?
-7. What vault size should v1 performance targets be measured against?
+7. What folder size should v1 performance targets be measured against?

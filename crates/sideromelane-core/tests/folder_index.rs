@@ -1,12 +1,12 @@
 #![allow(missing_docs, clippy::unwrap_used)]
 
-use sideromelane_core::{MarkdownNote, NoteId, VaultIndex};
+use sideromelane_core::{FolderIndex, MarkdownNote, NoteId};
 
 #[test]
 fn builds_backlinks_and_graph_edges_from_resolved_wiki_links() {
-    let launch_id = NoteId::from_vault_relative_path("plans/Launch Plan.md").unwrap();
-    let checklist_id = NoteId::from_vault_relative_path("plans/Release Checklist.md").unwrap();
-    let roadmap_id = NoteId::from_vault_relative_path("plans/Roadmap.md").unwrap();
+    let launch_id = NoteId::from_folder_relative_path("plans/Launch Plan.md").unwrap();
+    let checklist_id = NoteId::from_folder_relative_path("plans/Release Checklist.md").unwrap();
+    let roadmap_id = NoteId::from_folder_relative_path("plans/Roadmap.md").unwrap();
 
     let launch = MarkdownNote::parse(
         launch_id.clone(),
@@ -18,7 +18,7 @@ fn builds_backlinks_and_graph_edges_from_resolved_wiki_links() {
     );
     let roadmap = MarkdownNote::parse(roadmap_id.clone(), "# Roadmap\n\nNo links yet.\n");
 
-    let index = VaultIndex::from_notes(vec![launch, checklist, roadmap]);
+    let index = FolderIndex::from_notes(vec![launch, checklist, roadmap]);
 
     assert_eq!(
         index

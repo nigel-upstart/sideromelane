@@ -4,7 +4,7 @@ use sideromelane_core::{MarkdownNote, MetadataValue, NoteId};
 
 #[test]
 fn parses_note_body_and_simple_frontmatter() {
-    let note_id = NoteId::from_vault_relative_path("plans/Launch Plan.md").unwrap();
+    let note_id = NoteId::from_folder_relative_path("plans/Launch Plan.md").unwrap();
     let note = MarkdownNote::parse(
         note_id,
         r#"---
@@ -41,7 +41,7 @@ Ship the [[Release Checklist]].
 
 #[test]
 fn treats_text_without_complete_frontmatter_as_body() {
-    let note_id = NoteId::from_vault_relative_path("Inbox.md").unwrap();
+    let note_id = NoteId::from_folder_relative_path("Inbox.md").unwrap();
     let source = "---\ntitle: Missing Close\n\n# Still Source\n";
     let note = MarkdownNote::parse(note_id, source);
 

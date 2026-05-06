@@ -4,9 +4,9 @@ use sideromelane_core::{MarkdownNote, NoteId, SearchIndex, SearchQuery};
 
 #[test]
 fn keyword_search_ranks_text_matches_and_applies_filters() {
-    let launch_id = NoteId::from_vault_relative_path("plans/Launch Plan.md").unwrap();
-    let roadmap_id = NoteId::from_vault_relative_path("plans/Roadmap.md").unwrap();
-    let retro_id = NoteId::from_vault_relative_path("meetings/Retro.md").unwrap();
+    let launch_id = NoteId::from_folder_relative_path("plans/Launch Plan.md").unwrap();
+    let roadmap_id = NoteId::from_folder_relative_path("plans/Roadmap.md").unwrap();
+    let retro_id = NoteId::from_folder_relative_path("meetings/Retro.md").unwrap();
 
     let launch = MarkdownNote::parse(
         launch_id.clone(),

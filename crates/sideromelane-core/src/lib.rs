@@ -1,19 +1,19 @@
 //! Core domain types for Sideromelane.
 
 mod analysis;
+mod folder;
 mod index;
 mod note;
 mod search;
-mod vault;
 
 pub use analysis::{Heading, ImageEmbed, NoteAnalysis, WikiLink};
-pub use index::{Backlink, Graph, GraphEdge, GraphNode, VaultIndex};
+pub use folder::{FolderPathError, NoteId};
+pub use index::{Backlink, FolderIndex, Graph, GraphEdge, GraphNode};
 pub use note::{Frontmatter, MarkdownNote, MetadataValue};
 pub use search::{
     HybridSearchIndex, HybridSearchResult, SearchIndex, SearchQuery, SearchResult,
     SemanticSearchIndex, SemanticSearchResult,
 };
-pub use vault::{NoteId, VaultPathError};
 
 /// Returns the current project name.
 #[must_use]

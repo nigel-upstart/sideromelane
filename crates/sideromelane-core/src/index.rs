@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use crate::{MarkdownNote, NoteAnalysis, NoteId};
 
-/// In-memory derived index for a set of parsed vault notes.
+/// In-memory derived index for a set of parsed folder notes.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct VaultIndex {
+pub struct FolderIndex {
     graph: Graph,
     backlinks: BTreeMap<NoteId, Vec<Backlink>>,
 }
 
-impl VaultIndex {
+impl FolderIndex {
     /// Builds an index from parsed notes.
     ///
     /// Wiki links resolve by unique note file stem. Links to missing or ambiguous targets are
