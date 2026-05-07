@@ -18,6 +18,8 @@ pub const FOLDER_METADATA_DIR: &str = ".sideromelane";
 pub const FOLDER_SETTINGS_FILE: &str = "settings.json";
 
 const CURRENT_SETTINGS_VERSION: u32 = 1;
+/// Maximum allowed byte size for a `settings.json` file.
+const MAX_SETTINGS_BYTES: u64 = 1 << 20; // 1 MiB
 
 /// Per-folder settings that drive walker and UI behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +154,13 @@ impl FolderSettings {
         let path = Self::settings_path(folder_root);
         match fs::read(&path) {
             Ok(bytes) => {
+                let file_size = fs::metadata(&path).map_or(bytes.len() as u64, |m| m.len());
+                if file_size > MAX_SETTINGS_BYTES {
+                    return Err(FolderSettingsError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "settings.json too large (max 1 MiB)",
+                    )));
+                }
                 let settings = serde_json::from_slice::<Self>(&bytes)?;
                 if settings.version > CURRENT_SETTINGS_VERSION {
                     return Err(FolderSettingsError::FutureVersion {
@@ -273,6 +282,22 @@ mod tests {
         assert_eq!(
             loaded.ui.tree_expanded_paths,
             vec!["Cloud".to_string(), "Cloud/Q4".to_string()]
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_settings_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let metadata_dir = dir.path().join(FOLDER_METADATA_DIR);
+        std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
+        let oversized_content = vec![b'a'; 2 * 1024 * 1024];
+        std::fs::write(metadata_dir.join(FOLDER_SETTINGS_FILE), &oversized_content)
+            .expect("write oversized file");
+
+        let result = FolderSettings::load(dir.path());
+        assert!(
+            matches!(result, Err(super::FolderSettingsError::Io(ref e)) if e.kind() == std::io::ErrorKind::InvalidData),
+            "expected Io(InvalidData) for oversized file, got: {result:?}",
         );
     }
 
