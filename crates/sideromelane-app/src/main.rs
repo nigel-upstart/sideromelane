@@ -5,12 +5,15 @@ mod graph_view;
 mod indexer;
 mod io;
 mod outline;
+mod preferences;
+mod state;
 mod tree;
 
 use std::fs::{self, File};
 use std::io as std_io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Sense};
 use sideromelane_core::{
@@ -20,6 +23,8 @@ use sideromelane_core::{
 
 use crate::indexer::{Indexer, IndexerCommand, IndexerEvent};
 use crate::io::safe_write;
+use crate::preferences::PreferencesWindow;
+use crate::state::{AppState, StartupMode};
 
 /// Maximum byte size of an image that can be dropped into the assets folder.
 const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -28,6 +33,10 @@ const IMAGE_HEADER_PEEK: u64 = 16;
 /// Maximum number of indexer events to drain per frame. Bounded so background bursts
 /// cannot starve UI input handling.
 const MAX_INDEXER_EVENTS_PER_FRAME: usize = 16;
+/// Debounce window for persisting [`AppState`]. Coalesces rapid edits (slider
+/// drags, repeated folder opens) into a single atomic save without blocking
+/// the UI on every keystroke.
+const APP_STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -37,14 +46,16 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
+    let app_state = AppState::load_or_default();
+
     eframe::run_native(
         "Sideromelane",
         native_options,
-        Box::new(|_creation_context| Ok(Box::<SideromelaneApp>::default())),
+        Box::new(move |_creation_context| Ok(Box::new(SideromelaneApp::new(app_state)))),
     )
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SideromelaneApp {
     folder: Option<FolderState>,
     mode: EditorMode,
@@ -53,12 +64,46 @@ struct SideromelaneApp {
     status: String,
     indexer: Option<Indexer>,
     graph_view: graph_view::GraphViewState,
+    app_state: AppState,
+    app_state_dirty: bool,
+    last_state_save: Instant,
+    preferences_open: bool,
+    preferences_window: PreferencesWindow,
+    /// Set to `true` until the first frame so the app can run its
+    /// startup-mode hand-off (open last folder + last note, or initialize
+    /// the default folder with a fresh untitled note) inside `update`,
+    /// where the egui context is available for any future interactive bits.
+    startup_pending: bool,
+}
+
+impl SideromelaneApp {
+    fn new(app_state: AppState) -> Self {
+        Self {
+            folder: None,
+            mode: EditorMode::default(),
+            search_text: String::new(),
+            active_block_index: None,
+            status: String::new(),
+            indexer: None,
+            graph_view: graph_view::GraphViewState::default(),
+            app_state,
+            app_state_dirty: false,
+            last_state_save: Instant::now(),
+            preferences_open: false,
+            preferences_window: PreferencesWindow::default(),
+            startup_pending: true,
+        }
+    }
 }
 
 impl eframe::App for SideromelaneApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.indexer.is_none() {
             self.indexer = Some(Indexer::new(ui.ctx().clone()));
+        }
+        if self.startup_pending {
+            self.startup_pending = false;
+            self.run_startup();
         }
         self.drain_indexer_events();
         self.handle_dropped_files(ui.ctx());
@@ -85,6 +130,10 @@ impl eframe::App for SideromelaneApp {
                 ui.selectable_value(&mut self.mode, EditorMode::Raw, "Raw");
                 ui.selectable_value(&mut self.mode, EditorMode::LivePreview, "Live Preview");
                 ui.separator();
+                if ui.button("Preferences\u{2026}").clicked() {
+                    self.preferences_open = !self.preferences_open;
+                }
+                ui.separator();
                 ui.label(&self.status);
             });
         });
@@ -100,6 +149,33 @@ impl eframe::App for SideromelaneApp {
             .show_inside(ui, |ui| self.right_panel(ui));
 
         egui::CentralPanel::default().show_inside(ui, |ui| self.main_panel(ui));
+
+        if self.preferences_open {
+            let context = ui.ctx().clone();
+            let changed = self.preferences_window.show(
+                &context,
+                &mut self.preferences_open,
+                &mut self.app_state,
+            );
+            if changed {
+                self.app_state_dirty = true;
+            }
+        }
+
+        // Track the last selected note in `last_note` so the next launch can
+        // reopen exactly where the user left off. The folder-side bookkeeping
+        // (last_folder, recent_folders) lives in `open_folder`.
+        if let Some(folder) = self.folder.as_ref()
+            && let Some(note) = folder.selected_note()
+        {
+            let relative = note.note_id.relative_path().display().to_string();
+            if self.app_state.last_note.as_deref() != Some(&relative) {
+                self.app_state.last_note = Some(relative);
+                self.app_state_dirty = true;
+            }
+        }
+
+        self.maybe_persist_app_state();
     }
 }
 
@@ -215,11 +291,85 @@ impl SideromelaneApp {
             Ok(folder) => {
                 self.status = format!("Opened {}", folder.root.display());
                 let scan_root = folder.root.clone();
+                self.app_state.record_folder_open(&scan_root);
+                // Drop the previous note's `last_note` so the post-`update`
+                // bookkeeping picks up whatever this folder selects on the
+                // next frame rather than carrying over a stale relative path.
+                self.app_state.last_note = None;
+                self.app_state_dirty = true;
                 self.folder = Some(folder);
                 self.active_block_index = None;
                 self.dispatch_rescan(scan_root);
             }
             Err(error) => self.status = format!("Open failed: {error}"),
+        }
+    }
+
+    /// Boot-time hand-off driven by `app_state.startup_mode`. Called once
+    /// from `update` on the first frame so the eframe context is live in
+    /// case any startup branch wants to surface a dialog.
+    fn run_startup(&mut self) {
+        match self.app_state.startup_mode {
+            StartupMode::ReloadLast => {
+                if let Some(folder) = self.app_state.last_folder.clone()
+                    && folder.is_dir()
+                {
+                    let target_note = self.app_state.last_note.clone();
+                    self.open_folder(folder);
+                    if let Some(relative) = target_note
+                        && let Some(state) = self.folder.as_mut()
+                        && let Some(index) = state.notes.iter().position(|note| {
+                            note.note_id.relative_path().to_string_lossy() == relative
+                        })
+                    {
+                        state.selected = Some(index);
+                        self.active_block_index = None;
+                    }
+                    return;
+                }
+                self.boot_default_folder();
+            }
+            StartupMode::NewNote => {
+                self.boot_default_folder();
+                self.new_note();
+            }
+        }
+    }
+
+    /// Open (creating if needed) the configured default folder.
+    fn boot_default_folder(&mut self) {
+        let default_folder = self.app_state.default_folder.clone();
+        if let Err(error) = fs::create_dir_all(&default_folder) {
+            self.status = format!(
+                "Default folder unavailable ({}): {error}",
+                default_folder.display()
+            );
+            return;
+        }
+        self.open_folder(default_folder);
+    }
+
+    /// Persist `app_state` if it has been marked dirty and the debounce
+    /// window has elapsed. Called once per frame from `update`. Errors are
+    /// surfaced in `status` but never block the UI.
+    fn maybe_persist_app_state(&mut self) {
+        if !self.app_state_dirty {
+            return;
+        }
+        if self.last_state_save.elapsed() < APP_STATE_SAVE_DEBOUNCE {
+            return;
+        }
+        match self.app_state.save_default() {
+            Ok(()) => {
+                self.app_state_dirty = false;
+                self.last_state_save = Instant::now();
+            }
+            Err(error) => {
+                self.status = format!("App state save failed: {error}");
+                // Leave the dirty flag set so a future frame retries; reset
+                // the timer so we don't busy-loop on the failure.
+                self.last_state_save = Instant::now();
+            }
         }
     }
 
