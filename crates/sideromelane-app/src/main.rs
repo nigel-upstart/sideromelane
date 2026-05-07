@@ -365,7 +365,10 @@ impl SideromelaneApp {
             return;
         }
 
-        let target_path = unique_asset_path(&assets_dir, &safe_name);
+        let Some(target_path) = unique_asset_path(&assets_dir, &safe_name) else {
+            self.status = "Image rejected: too many name collisions in assets/".into();
+            return;
+        };
 
         let Ok(canonical_root) = folder.root.canonicalize() else {
             self.status = "Image rejected: target outside folder".into();
@@ -1183,10 +1186,15 @@ fn canonicalize_target(target: &Path) -> Option<PathBuf> {
     }
 }
 
-fn unique_asset_path(assets_dir: &Path, file_name: &str) -> PathBuf {
+/// Maximum suffix attempts when resolving a unique asset path. A value this
+/// large is well past anything a human would intentionally create and cheaply
+/// caps a hostile or pathological assets/ directory.
+const UNIQUE_ASSET_MAX_ATTEMPTS: u32 = 1024;
+
+fn unique_asset_path(assets_dir: &Path, file_name: &str) -> Option<PathBuf> {
     let candidate = assets_dir.join(file_name);
     if !candidate.exists() {
-        return candidate;
+        return Some(candidate);
     }
 
     let stem = Path::new(file_name)
@@ -1198,14 +1206,14 @@ fn unique_asset_path(assets_dir: &Path, file_name: &str) -> PathBuf {
         .and_then(|extension| extension.to_str())
         .unwrap_or("png");
 
-    for index in 1.. {
+    for index in 1..=UNIQUE_ASSET_MAX_ATTEMPTS {
         let candidate = assets_dir.join(format!("{stem}-{index}.{extension}"));
         if !candidate.exists() {
-            return candidate;
+            return Some(candidate);
         }
     }
 
-    unreachable!("unbounded loop returns before exhausting usize");
+    None
 }
 
 fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
