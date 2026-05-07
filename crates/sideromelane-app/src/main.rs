@@ -1806,7 +1806,7 @@ enum WatchOutcome {
     UnknownPath,
     /// Note is dirty; queue a per-note conflict modal.
     Conflict(NoteId),
-    /// Note is clean; reload notes[index].source from disk.
+    /// Note is clean; reload `notes[index].source` from disk.
     Reload {
         /// Index into `notes` of the note that should be reloaded.
         index: usize,
