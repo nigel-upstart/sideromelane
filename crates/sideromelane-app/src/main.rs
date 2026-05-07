@@ -666,9 +666,14 @@ impl SideromelaneApp {
                 let path = folder.notes[index].absolute_path.clone();
                 match fs::read_to_string(&path) {
                     Ok(source) => {
-                        let note = &mut folder.notes[index];
-                        note.source = source;
-                        note.last_edit_at = now;
+                        apply_reload(&mut folder.notes, index, source);
+                        // If the reloaded note is currently selected and we
+                        // are mid Live-Preview, the cached active block index
+                        // may now point past the new block list — drop it so
+                        // the renderer re-derives it from the fresh source.
+                        if folder.selected.is_some_and(|i| i == index) {
+                            self.active_block_index = None;
+                        }
                     }
                     Err(error) => {
                         self.status = format!("Reload failed: {error}");
@@ -1813,6 +1818,17 @@ enum WatchOutcome {
     },
 }
 
+/// Apply a watcher-driven reload to `notes[index]`. The fresh `source` came
+/// straight from disk, so the in-memory copy is now clean again and any
+/// subsequent auto-save debounce should be governed by the user's *own* next
+/// edit — not by the moment we observed the external write. We therefore
+/// clear `dirty` and deliberately leave `last_edit_at` untouched.
+fn apply_reload(notes: &mut [NoteRecord], index: usize, source: String) {
+    let note = &mut notes[index];
+    note.source = source;
+    note.dirty = false;
+}
+
 /// Pure dispatch helper for [`SideromelaneApp::apply_watch_event`]. Splits the
 /// suppress / reload / conflict decision from the mutation so it can be unit-
 /// tested without constructing a full [`SideromelaneApp`].
@@ -2241,5 +2257,28 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(outcome, WatchOutcome::Ignored);
+    }
+
+    #[test]
+    fn apply_reload_clears_dirty_and_preserves_last_edit_at() {
+        use super::apply_reload;
+
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Reload.md");
+        fs::write(&path, "stale\n").expect("seed");
+
+        let last_edit_at = Instant::now();
+        let mut record = note_record(path, "stale\n", last_edit_at);
+        record.dirty = true;
+        let mut notes = vec![record];
+
+        apply_reload(&mut notes, 0, "fresh\n".to_owned());
+
+        assert_eq!(notes[0].source, "fresh\n");
+        assert!(!notes[0].dirty, "dirty should be cleared after reload");
+        assert_eq!(
+            notes[0].last_edit_at, last_edit_at,
+            "last_edit_at must not be bumped by an external reload"
+        );
     }
 }
