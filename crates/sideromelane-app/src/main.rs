@@ -501,7 +501,7 @@ impl SideromelaneApp {
                 let relative = note.note_id.relative_path().display().to_string();
                 self.status = format!("Saved {relative}");
                 self.last_self_write_at
-                    .insert(absolute_path, Instant::now());
+                    .insert(canonicalize_path(&absolute_path), Instant::now());
                 if let Some(indexer) = self.indexer.as_ref() {
                     indexer.send(IndexerCommand::NoteChanged { note_id, source });
                 }
@@ -589,7 +589,7 @@ impl SideromelaneApp {
         } in &outcome.saved
         {
             self.last_self_write_at
-                .insert(absolute_path.clone(), Instant::now());
+                .insert(canonicalize_path(absolute_path), Instant::now());
             self.status = format!("Auto-saved {relative}");
             if let Some(indexer) = self.indexer.as_ref() {
                 indexer.send(IndexerCommand::NoteChanged {
@@ -1816,6 +1816,17 @@ enum WatchOutcome {
         /// Index into `notes` of the note that should be reloaded.
         index: usize,
     },
+}
+
+/// Resolve `path` to its canonical form, falling back to the original on
+/// failure. Used by the self-write suppression map so its keys line up with
+/// the canonical paths the file watcher delivers (e.g. macOS resolves
+/// `/var/folders/...` to `/private/var/folders/...`). When canonicalisation
+/// fails (file just deleted, permission denied, …) we keep the original
+/// path: a non-canonical match is still valid for paths under non-symlinked
+/// roots and is strictly safer than dropping the entry.
+pub(crate) fn canonicalize_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Apply a watcher-driven reload to `notes[index]`. The fresh `source` came
