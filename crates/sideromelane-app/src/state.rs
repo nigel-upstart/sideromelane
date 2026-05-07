@@ -185,28 +185,31 @@ impl AppState {
 
     /// Loads state from `path`, returning defaults if the file is missing.
     pub fn load(path: &Path) -> Result<Self, AppStateError> {
-        match fs::read(path) {
-            Ok(bytes) => {
-                let file_size = fs::metadata(path).map_or(bytes.len() as u64, |m| m.len());
-                if file_size > MAX_STATE_BYTES {
+        // Check the file size before reading any bytes into memory so an
+        // adversarially large state.json cannot cause an unbounded allocation.
+        match fs::metadata(path) {
+            Ok(meta) => {
+                if meta.len() > MAX_STATE_BYTES {
                     return Err(AppStateError::Io(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "state.json too large (max 1 MiB)",
                     )));
                 }
-                let mut state = serde_json::from_slice::<Self>(&bytes)?;
-                if state.version > CURRENT_STATE_VERSION {
-                    return Err(AppStateError::FutureVersion {
-                        found: state.version,
-                        supported: CURRENT_STATE_VERSION,
-                    });
-                }
-                state.normalize();
-                Ok(state)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(AppStateError::Io(error)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(AppStateError::Io(error)),
         }
+
+        let bytes = fs::read(path)?;
+        let mut state = serde_json::from_slice::<Self>(&bytes)?;
+        if state.version > CURRENT_STATE_VERSION {
+            return Err(AppStateError::FutureVersion {
+                found: state.version,
+                supported: CURRENT_STATE_VERSION,
+            });
+        }
+        state.normalize();
+        Ok(state)
     }
 
     /// Loads from the platform default path, falling back to defaults on any
