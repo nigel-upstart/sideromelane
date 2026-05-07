@@ -367,6 +367,25 @@ impl SideromelaneApp {
 
         let target_path = unique_asset_path(&assets_dir, &safe_name);
 
+        let Ok(canonical_root) = folder.root.canonicalize() else {
+            self.status = "Image rejected: target outside folder".into();
+            return;
+        };
+        let Some(canonical_target) = canonicalize_target(&target_path) else {
+            self.status = "Image rejected: target outside folder".into();
+            return;
+        };
+        if !canonical_target.starts_with(&canonical_root) {
+            self.status = "Image rejected: target outside folder".into();
+            return;
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&target_path)
+            && metadata.file_type().is_symlink()
+        {
+            self.status = "Image rejected: target is a symlink".into();
+            return;
+        }
+
         match copy_asset(source_path, &target_path) {
             Ok(()) => {
                 let relative_target = target_path
@@ -1133,6 +1152,35 @@ fn is_image_path(path: &Path) -> bool {
                 "png" | "jpg" | "jpeg" | "gif" | "webp"
             )
         })
+}
+
+/// Canonicalize `target` for path-traversal checks.
+///
+/// Falls back to canonicalizing the parent directory and rejoining the leaf
+/// name when the target itself does not yet exist (the common case for fresh
+/// asset drops). Returns `None` if neither the target nor its parent can be
+/// canonicalized.
+fn canonicalize_target(target: &Path) -> Option<PathBuf> {
+    if let Ok(path) = target.canonicalize() {
+        return Some(path);
+    }
+    // Walk up until we find an ancestor that exists, canonicalize it, and
+    // rejoin the missing tail. This handles fresh `assets/` directories that
+    // `copy_asset` will create on demand.
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut current = target;
+    loop {
+        if let Ok(canonical) = current.canonicalize() {
+            let mut resolved = canonical;
+            for component in tail.iter().rev() {
+                resolved.push(component);
+            }
+            return Some(resolved);
+        }
+        let file_name = current.file_name()?;
+        tail.push(file_name);
+        current = current.parent()?;
+    }
 }
 
 fn unique_asset_path(assets_dir: &Path, file_name: &str) -> PathBuf {
