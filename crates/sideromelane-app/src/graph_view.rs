@@ -209,7 +209,26 @@ pub fn note_focus(note_id: &NoteId) -> GraphNode {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use sideromelane_core::Tag;
+    use sideromelane_core::{Neighborhood, Tag};
+
+    fn note_node(path: &str) -> GraphNode {
+        GraphNode::Note {
+            note_id: NoteId::from_folder_relative_path(path).unwrap(),
+        }
+    }
+
+    fn tag_node(name: &str) -> GraphNode {
+        GraphNode::Tag {
+            tag: Tag::new(name).unwrap(),
+        }
+    }
+
+    fn node_location(graph: &NoteGraph, target: &GraphNode) -> Option<Pos2> {
+        graph
+            .nodes_iter()
+            .find(|(_, n)| n.payload() == target)
+            .map(|(_, n)| n.location())
+    }
 
     #[test]
     fn node_label_prefixes_tag_with_hash() {
@@ -244,5 +263,90 @@ mod tests {
         let note_id = NoteId::from_folder_relative_path("work/My Note.md").unwrap();
         let label = node_label(&GraphNode::Note { note_id });
         assert_eq!(label, "My Note");
+    }
+
+    #[test]
+    fn build_graph_places_focus_node_at_origin() {
+        let focus = note_node("notes/Focus.md");
+        let neighborhood = Neighborhood {
+            nodes: vec![focus.clone()],
+            edges: vec![],
+        };
+        let graph = build_graph(&focus, &neighborhood);
+        let loc = node_location(&graph, &focus).unwrap();
+        assert_eq!(loc, Pos2::ZERO);
+    }
+
+    #[test]
+    fn build_graph_places_single_non_focus_node_off_origin() {
+        let focus = note_node("notes/Focus.md");
+        let other = tag_node("kubernetes");
+        let neighborhood = Neighborhood {
+            nodes: vec![focus.clone(), other.clone()],
+            edges: vec![(focus.clone(), other.clone())],
+        };
+        let graph = build_graph(&focus, &neighborhood);
+
+        let focus_loc = node_location(&graph, &focus).unwrap();
+        let other_loc = node_location(&graph, &other).unwrap();
+
+        assert_eq!(focus_loc, Pos2::ZERO);
+        assert_ne!(
+            other_loc,
+            Pos2::ZERO,
+            "non-focus node must not be at origin"
+        );
+        // With count=1, angle=0 → (150, 0)
+        assert!((other_loc.x - 150.0_f32).abs() < 1e-3);
+        assert!(other_loc.y.abs() < 1e-3);
+    }
+
+    #[test]
+    fn build_graph_places_multiple_non_focus_nodes_at_distinct_positions() {
+        let focus = note_node("notes/Focus.md");
+        let t1 = tag_node("alpha");
+        let t2 = tag_node("beta");
+        let t3 = tag_node("gamma");
+        let neighborhood = Neighborhood {
+            nodes: vec![focus.clone(), t1.clone(), t2.clone(), t3.clone()],
+            edges: vec![],
+        };
+        let graph = build_graph(&focus, &neighborhood);
+
+        let locs: Vec<Pos2> = [&t1, &t2, &t3]
+            .iter()
+            .map(|n| node_location(&graph, n).unwrap())
+            .collect();
+
+        // All off origin
+        for loc in &locs {
+            assert_ne!(*loc, Pos2::ZERO, "non-focus nodes must not be at origin");
+        }
+
+        // All on a circle of radius ~150
+        for loc in &locs {
+            let r = loc.x.hypot(loc.y);
+            assert!(
+                (r - 150.0_f32).abs() < 1e-2,
+                "expected radius ~150, got {r}"
+            );
+        }
+
+        // All distinct
+        assert_ne!(locs[0], locs[1]);
+        assert_ne!(locs[1], locs[2]);
+        assert_ne!(locs[0], locs[2]);
+    }
+
+    #[test]
+    fn build_graph_adds_edges_between_existing_nodes() {
+        let focus = note_node("notes/Focus.md");
+        let other = note_node("notes/Other.md");
+        let neighborhood = Neighborhood {
+            nodes: vec![focus.clone(), other.clone()],
+            edges: vec![(focus.clone(), other)],
+        };
+        let graph = build_graph(&focus, &neighborhood);
+        assert_eq!(graph.g().edge_count(), 1);
     }
 }
