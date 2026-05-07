@@ -7,11 +7,6 @@
 //! thread can drain events each frame in the same shape as
 //! [`crate::indexer::Indexer`]'s `poll`.
 
-// Suppressed until subsequent commits in this slice wire the watcher into
-// `SideromelaneApp`. Kept on the module so each public item below can carry
-// its full documented signature without per-item `#[allow]` noise.
-#![allow(dead_code)]
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -37,6 +32,7 @@ pub enum WatchKind {
     /// Reserved for future event categories. Not produced today; kept so the
     /// enum is non-exhaustive in spirit without leaning on the unstable
     /// attribute.
+    #[allow(dead_code)]
     Other,
 }
 
