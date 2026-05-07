@@ -9,7 +9,7 @@ mod note;
 pub mod scan;
 mod search;
 
-pub use analysis::{Heading, ImageEmbed, NoteAnalysis, WikiLink};
+pub use analysis::{Heading, ImageEmbed, NoteAnalysis, WikiLink, non_fence_ranges};
 pub use asset::{
     AssetNameError, ImageMagicError, sanitize_asset_filename, validate_image_magic_bytes,
 };

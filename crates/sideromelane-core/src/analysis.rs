@@ -119,7 +119,11 @@ impl ImageEmbed {
 /// - Opening fence: at least 3 of the same character (backtick or tilde), indented 0-3 spaces.
 /// - Closing fence: same character, at least as long as the opening, indented 0-3 spaces.
 /// - Content between fences is excluded from the returned ranges.
-fn non_fence_ranges(body: &str) -> Vec<std::ops::Range<usize>> {
+///
+/// Exposed so that app-side helpers (e.g. the outline jump) can skip fenced
+/// regions when scanning for heading byte offsets without duplicating this logic.
+#[must_use]
+pub fn non_fence_ranges(body: &str) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     let mut segment_start = 0usize;
     let bytes = body.as_bytes();
