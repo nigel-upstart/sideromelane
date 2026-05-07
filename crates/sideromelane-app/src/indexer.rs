@@ -364,6 +364,17 @@ mod tests {
     }
 
     #[test]
+    fn drop_joins_worker_thread_without_hanging() {
+        let indexer = Indexer::new(egui::Context::default());
+        let start = Instant::now();
+        drop(indexer);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "drop should not hang"
+        );
+    }
+
+    #[test]
     fn rescan_publishes_scan_failed_for_missing_root() {
         let indexer = Indexer::new(egui::Context::default());
         let bad_root = PathBuf::from("/this/path/does/not/exist/sideromelane");
