@@ -9,7 +9,9 @@ mod note;
 pub mod scan;
 mod search;
 
-pub use analysis::{Heading, ImageEmbed, NoteAnalysis, WikiLink, non_fence_ranges};
+pub use analysis::{
+    Heading, ImageEmbed, NoteAnalysis, WikiLink, extract_inline_tags, merged_tags, non_fence_ranges,
+};
 pub use asset::{
     AssetNameError, ImageMagicError, sanitize_asset_filename, validate_image_magic_bytes,
 };
@@ -18,7 +20,7 @@ pub use folder_settings::{
     FOLDER_METADATA_DIR, FOLDER_SETTINGS_FILE, FolderSettings, FolderSettingsError, IgnoreSettings,
 };
 pub use index::{Backlink, FolderIndex, Graph, GraphEdge, GraphNode, Neighborhood};
-pub use note::{Frontmatter, MarkdownNote, MetadataValue};
+pub use note::{Frontmatter, MarkdownNote, MetadataValue, Tag, TagError};
 pub use scan::{ScanError, WalkOptions, walk_markdown_paths};
 pub use search::{
     HybridSearchIndex, HybridSearchResult, SearchIndex, SearchQuery, SearchResult,

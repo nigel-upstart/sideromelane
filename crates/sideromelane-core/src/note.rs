@@ -214,3 +214,68 @@ fn strip_matching_quotes(value: &str) -> &str {
 fn line_without_newline(line: &str) -> &str {
     line.trim_end_matches(['\r', '\n'])
 }
+
+/// A validated tag name without the leading `#`.
+///
+/// Valid characters: `[A-Za-z0-9_\-/]`. The `/` supports hierarchical tags
+/// such as `#kubernetes/storage` (Obsidian convention).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Tag(String);
+
+/// Errors returned by [`Tag::new`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagError {
+    /// The input is empty after stripping an optional leading `#`.
+    Empty,
+    /// The input contains a character outside `[A-Za-z0-9_\-/]`.
+    InvalidChar(char),
+}
+
+impl Tag {
+    /// Constructs and validates a tag from a string.
+    ///
+    /// Accepts input with or without a leading `#`. Returns [`TagError`] if
+    /// the remaining name is empty or contains invalid characters.
+    pub fn new(name: impl Into<String>) -> Result<Self, TagError> {
+        let s: String = name.into();
+        let s = s.strip_prefix('#').unwrap_or(&s);
+        if s.is_empty() {
+            return Err(TagError::Empty);
+        }
+        if let Some(c) = s.chars().find(|&c| !is_tag_char(c)) {
+            return Err(TagError::InvalidChar(c));
+        }
+        Ok(Self(s.to_owned()))
+    }
+
+    /// Returns the tag name without the leading `#`.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Tag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+const fn is_tag_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/')
+}
+
+impl Frontmatter {
+    /// Returns validated tags from the `tags:` frontmatter field.
+    ///
+    /// Invalid entries are dropped silently (untrusted input; one bad entry
+    /// should not suppress the whole list).
+    #[must_use]
+    pub fn tags(&self) -> Vec<Tag> {
+        self.list("tags")
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|s| Tag::new(s.as_str()).ok())
+            .collect()
+    }
+}

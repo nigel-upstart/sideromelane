@@ -1,4 +1,5 @@
 use crate::MarkdownNote;
+use crate::note::Tag;
 
 /// Extracted note content used by indexing, outlines, backlinks, and graph views.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -6,6 +7,7 @@ pub struct NoteAnalysis {
     headings: Vec<Heading>,
     wiki_links: Vec<WikiLink>,
     image_embeds: Vec<ImageEmbed>,
+    inline_tags: Vec<Tag>,
 }
 
 impl NoteAnalysis {
@@ -14,11 +16,13 @@ impl NoteAnalysis {
     pub fn from_note(note: &MarkdownNote) -> Self {
         let headings = extract_headings(note.body());
         let (wiki_links, image_embeds) = extract_wiki_targets(note.body());
+        let inline_tags = extract_inline_tags(note.body());
 
         Self {
             headings,
             wiki_links,
             image_embeds,
+            inline_tags,
         }
     }
 
@@ -39,6 +43,35 @@ impl NoteAnalysis {
     pub fn image_embeds(&self) -> &[ImageEmbed] {
         &self.image_embeds
     }
+
+    /// Returns inline `#tag` mentions found in note body order, deduplicated.
+    #[must_use]
+    pub fn inline_tags(&self) -> &[Tag] {
+        &self.inline_tags
+    }
+}
+
+/// Returns the deduplicated, sorted union of frontmatter and inline tags for a note.
+///
+/// This is the single source of truth for downstream consumers; nothing should
+/// read frontmatter tags and inline tags independently.
+#[must_use]
+pub fn merged_tags(note: &MarkdownNote, analysis: &NoteAnalysis) -> Vec<Tag> {
+    use std::collections::BTreeSet;
+
+    let mut tags = BTreeSet::new();
+
+    if let Some(frontmatter) = note.frontmatter() {
+        for tag in frontmatter.tags() {
+            tags.insert(tag);
+        }
+    }
+
+    for tag in analysis.inline_tags() {
+        tags.insert(tag.clone());
+    }
+
+    tags.into_iter().collect()
 }
 
 /// Markdown heading extracted from a note body.
@@ -216,6 +249,154 @@ pub fn non_fence_ranges(body: &str) -> Vec<std::ops::Range<usize>> {
     ranges
 }
 
+/// Returns byte ranges of `body` that are outside fenced code blocks AND inline
+/// code spans (single or multi-backtick). Used by [`extract_inline_tags`] to
+/// skip both fenced blocks and inline code.
+fn non_code_ranges(body: &str) -> Vec<std::ops::Range<usize>> {
+    let body_bytes = body.as_bytes();
+    let mut result = Vec::new();
+
+    for range in non_fence_ranges(body) {
+        let offset = range.start;
+        let seg_bytes = &body_bytes[range];
+        let mut seg_start = 0usize;
+        let mut i = 0usize;
+
+        while i < seg_bytes.len() {
+            if seg_bytes[i] != b'`' {
+                i += 1;
+                continue;
+            }
+
+            let tick_start = i;
+            let tick_len = seg_bytes[tick_start..]
+                .iter()
+                .take_while(|&&b| b == b'`')
+                .count();
+
+            // Search for a matching closing run of the same backtick length.
+            let mut search = tick_start + tick_len;
+            let mut found_close = false;
+
+            while search + tick_len <= seg_bytes.len() {
+                if seg_bytes[search] == b'`' {
+                    let close_run = seg_bytes[search..]
+                        .iter()
+                        .take_while(|&&b| b == b'`')
+                        .count();
+                    if close_run == tick_len {
+                        if seg_start < tick_start {
+                            result.push(offset + seg_start..offset + tick_start);
+                        }
+                        i = search + tick_len;
+                        seg_start = i;
+                        found_close = true;
+                        break;
+                    }
+                    // Different-length run — skip it.
+                    search += close_run;
+                } else {
+                    search += 1;
+                }
+            }
+
+            if !found_close {
+                // No matching close — treat the backtick run as literal text.
+                i = tick_start + tick_len;
+            }
+        }
+
+        if seg_start < seg_bytes.len() {
+            result.push(offset + seg_start..offset + seg_bytes.len());
+        }
+    }
+
+    result
+}
+
+/// Returns inline `#tag` mentions from `body` in document order, deduplicated.
+///
+/// Tags inside fenced code blocks and inline code spans are skipped. A `#` is
+/// only treated as a tag opener when it is at the start of the body or preceded
+/// by whitespace — `text#middle` is not a tag and `# Heading` (space after `#`)
+/// is not a tag. Trailing punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `)`, `]`,
+/// `}`, `"`, `'`) is stripped from the tag name.
+#[must_use]
+pub fn extract_inline_tags(body: &str) -> Vec<Tag> {
+    use std::collections::BTreeSet;
+
+    let body_bytes = body.as_bytes();
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+
+    for range in non_code_ranges(body) {
+        let seg = &body[range.clone()];
+        let seg_bytes = seg.as_bytes();
+        let offset = range.start;
+        let mut i = 0usize;
+
+        while i < seg_bytes.len() {
+            if seg_bytes[i] != b'#' {
+                i += 1;
+                continue;
+            }
+
+            let abs = offset + i;
+            let preceded_by_boundary =
+                abs == 0 || matches!(body_bytes[abs - 1], b' ' | b'\t' | b'\n' | b'\r');
+
+            if !preceded_by_boundary {
+                i += 1;
+                continue;
+            }
+
+            let tag_start = i + 1;
+            let tag_len = seg_bytes[tag_start..]
+                .iter()
+                .take_while(|&&b| is_tag_byte(b))
+                .count();
+
+            if tag_len == 0 {
+                // `# ` or bare `#` — not a tag.
+                i += 1;
+                continue;
+            }
+
+            // Strip trailing punctuation.
+            let raw_end = tag_start + tag_len;
+            let trailing = seg_bytes[tag_start..raw_end]
+                .iter()
+                .rev()
+                .take_while(|&&b| is_trailing_punct_byte(b))
+                .count();
+            let tag_end = raw_end - trailing;
+
+            if tag_end > tag_start
+                && let Ok(tag) = Tag::new(&seg[tag_start..tag_end])
+                && !seen.contains(&tag)
+            {
+                seen.insert(tag.clone());
+                result.push(tag);
+            }
+
+            i = raw_end;
+        }
+    }
+
+    result
+}
+
+const fn is_tag_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'/')
+}
+
+const fn is_trailing_punct_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'.' | b',' | b';' | b':' | b'!' | b'?' | b')' | b']' | b'}' | b'"' | b'\''
+    )
+}
+
 fn extract_headings(body: &str) -> Vec<Heading> {
     non_fence_ranges(body)
         .into_iter()
@@ -340,4 +521,154 @@ fn extract_wiki_targets(body: &str) -> (Vec<WikiLink>, Vec<ImageEmbed>) {
     }
 
     (wiki_links, image_embeds)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::note::{Tag, TagError};
+
+    fn tag(s: &str) -> Tag {
+        Tag::new(s).expect("valid tag in test fixture")
+    }
+
+    // --- Tag::new validation ---
+
+    #[test]
+    fn tag_new_strips_leading_hash() {
+        assert_eq!(Tag::new("#foo").expect("valid").name(), "foo");
+        assert_eq!(Tag::new("foo").expect("valid").name(), "foo");
+    }
+
+    #[test]
+    fn tag_new_round_trip() {
+        assert_eq!(Tag::new("#foo"), Tag::new("foo"));
+    }
+
+    #[test]
+    fn tag_new_rejects_empty() {
+        assert_eq!(Tag::new(""), Err(TagError::Empty));
+        assert_eq!(Tag::new("#"), Err(TagError::Empty));
+    }
+
+    #[test]
+    fn tag_new_rejects_invalid_chars() {
+        assert!(matches!(
+            Tag::new("foo bar"),
+            Err(TagError::InvalidChar(' '))
+        ));
+        assert!(matches!(
+            Tag::new("foo#bar"),
+            Err(TagError::InvalidChar('#'))
+        ));
+    }
+
+    #[test]
+    fn tag_new_accepts_nested() {
+        assert_eq!(
+            Tag::new("kubernetes/storage").expect("valid").name(),
+            "kubernetes/storage"
+        );
+        assert_eq!(
+            Tag::new("#kubernetes/storage").expect("valid").name(),
+            "kubernetes/storage"
+        );
+    }
+
+    #[test]
+    fn tag_new_accepts_hyphen_underscore() {
+        assert!(Tag::new("my-tag_v2").is_ok());
+    }
+
+    // --- extract_inline_tags ---
+
+    #[test]
+    fn extracts_simple_tag() {
+        let tags = extract_inline_tags("#foo");
+        assert_eq!(tags, vec![tag("foo")]);
+    }
+
+    #[test]
+    fn extracts_tag_after_whitespace() {
+        let tags = extract_inline_tags("hello #world");
+        assert_eq!(tags, vec![tag("world")]);
+    }
+
+    #[test]
+    fn skips_mid_word_hash() {
+        let tags = extract_inline_tags("text#middle");
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn skips_heading_style() {
+        // `# Heading` — space after `#` means zero tag chars follow
+        let tags = extract_inline_tags("# Heading\n## Another");
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn strips_trailing_punctuation() {
+        let tags = extract_inline_tags("#tag. #tag, #tag; #tag: #tag!");
+        assert_eq!(tags, vec![tag("tag")]);
+    }
+
+    #[test]
+    fn strips_trailing_brackets() {
+        assert_eq!(extract_inline_tags("#tag)"), vec![tag("tag")]);
+        assert_eq!(extract_inline_tags("#tag]"), vec![tag("tag")]);
+        assert_eq!(extract_inline_tags("#tag}"), vec![tag("tag")]);
+    }
+
+    #[test]
+    fn deduplicates_tags() {
+        let tags = extract_inline_tags("#foo #bar #foo");
+        assert_eq!(tags, vec![tag("foo"), tag("bar")]);
+    }
+
+    #[test]
+    fn handles_nested_tags() {
+        let tags = extract_inline_tags("#kubernetes/storage");
+        assert_eq!(tags, vec![tag("kubernetes/storage")]);
+    }
+
+    #[test]
+    fn multiple_tags_one_line() {
+        let tags = extract_inline_tags("#a #b #c");
+        assert_eq!(tags, vec![tag("a"), tag("b"), tag("c")]);
+    }
+
+    #[test]
+    fn tag_at_start_of_string() {
+        let tags = extract_inline_tags("#first body text");
+        assert_eq!(tags, vec![tag("first")]);
+    }
+
+    #[test]
+    fn tag_after_newline() {
+        let tags = extract_inline_tags("line one\n#tag");
+        assert_eq!(tags, vec![tag("tag")]);
+    }
+
+    #[test]
+    fn skips_tags_in_fenced_code() {
+        let body = "text\n```\n#not-a-tag\n```\n#real-tag";
+        let tags = extract_inline_tags(body);
+        assert_eq!(tags, vec![tag("real-tag")]);
+    }
+
+    #[test]
+    fn skips_tags_in_inline_code() {
+        let body = "see `#not-a-tag` and #real-tag";
+        let tags = extract_inline_tags(body);
+        assert_eq!(tags, vec![tag("real-tag")]);
+    }
+
+    #[test]
+    fn skips_tags_in_multi_backtick_code() {
+        let body = "see ``#not-a-tag`` and #real-tag";
+        let tags = extract_inline_tags(body);
+        assert_eq!(tags, vec![tag("real-tag")]);
+    }
 }
