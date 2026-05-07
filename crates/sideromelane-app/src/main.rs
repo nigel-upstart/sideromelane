@@ -647,25 +647,22 @@ impl SideromelaneApp {
         let debounce =
             Duration::from_secs(u64::from(self.app_state.auto_save_debounce_secs.max(1)));
         let now = Instant::now();
-        let outcome = auto_save_dirty_notes(&mut folder.notes, debounce, now);
+        let sweep = auto_save_dirty_notes(&mut folder.notes, debounce, now);
         for AutoSaveOutcome {
             note_id,
             source,
             absolute_path,
             relative,
-        } in &outcome.saved
+        } in sweep.saved
         {
             self.last_self_write_at
-                .insert(canonicalize_path(absolute_path), Instant::now());
+                .insert(canonicalize_path(&absolute_path), Instant::now());
             self.status = format!("Auto-saved {relative}");
             if let Some(indexer) = self.indexer.as_ref() {
-                indexer.send(IndexerCommand::NoteChanged {
-                    note_id: note_id.clone(),
-                    source: source.clone(),
-                });
+                indexer.send(IndexerCommand::NoteChanged { note_id, source });
             }
         }
-        if let Some((relative, error)) = outcome.first_error {
+        if let Some((relative, error)) = sweep.first_error {
             self.status = format!("Auto-save failed for {relative}: {error}");
         }
 
