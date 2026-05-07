@@ -242,14 +242,12 @@ pub fn live_preview_editor(
                     // running total exceeds the cap.
                     *cache_bytes = cache_bytes.saturating_add(block.text.len());
                     let hash = hash_block_text(&block.text);
-                    let block_text = block.text.clone();
-                    let block_root = folder_root.to_path_buf();
                     let cached = get_or_insert_cached_preview(
                         block_preview_cache,
                         block.range.clone(),
                         hash,
                         || {
-                            let transformed = transform_wiki_links(&block_text, &block_root);
+                            let transformed = transform_wiki_links(&block.text, folder_root);
                             let link_targets = extract_note_link_targets(&transformed);
                             CachedBlockPreview {
                                 transformed,
@@ -257,13 +255,10 @@ pub fn live_preview_editor(
                             }
                         },
                     );
-                    let transformed = cached.transformed.clone();
-                    let link_targets = cached.link_targets.clone();
-
                     // Register every in-app link so `egui_commonmark` routes clicks
                     // through the cache instead of the OS browser. We feed the
                     // precomputed target list rather than rescanning the rendered text.
-                    register_cached_link_targets(cache, &link_targets);
+                    register_cached_link_targets(cache, &cached.link_targets);
 
                     // The viewer needs a stable, unique source id per block to keep
                     // its scrollable state. Combine the note stem with the block index.
@@ -271,7 +266,7 @@ pub fn live_preview_editor(
                         egui::Id::new(("sm-mdblock", &note_stem, index, block.range.start));
                     let response = ui
                         .push_id(source_id, |ui| {
-                            CommonMarkViewer::new().show(ui, cache, &transformed);
+                            CommonMarkViewer::new().show(ui, cache, &cached.transformed);
                         })
                         .response
                         .interact(Sense::click());
