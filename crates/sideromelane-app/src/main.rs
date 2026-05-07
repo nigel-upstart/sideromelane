@@ -32,6 +32,8 @@ use crate::state::{AppState, StartupMode};
 const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 /// Number of bytes inspected when validating image magic bytes.
 const IMAGE_HEADER_PEEK: u64 = 16;
+/// Height in pixels of the drag handle between the Files and Search sections.
+const HANDLE_PX: f32 = 4.0;
 /// Maximum number of indexer events to drain per frame. Bounded so background bursts
 /// cannot starve UI input handling.
 const MAX_INDEXER_EVENTS_PER_FRAME: usize = 16;
@@ -628,17 +630,25 @@ impl SideromelaneApp {
         });
         let mut tree_changed = false;
 
-        egui::ScrollArea::vertical()
-            .max_height(240.0)
-            .id_salt("files_tree")
-            .show(ui, |ui| {
-                for note_id in &folder_tree.root_notes {
-                    render_note_row(ui, folder, &mut selected_note, note_id, 0);
-                }
-                for subdir in &folder_tree.subdirs {
-                    render_dir(ui, folder, &mut selected_note, subdir, 0, &mut tree_changed);
-                }
-            });
+        // --- Resizable splitter between Files and Search ---
+        let ratio = self.app_state.left_pane_split_ratio;
+        let total_height = ui.available_height();
+        let panel_width = ui.available_width();
+        let files_height = clamp_split_height(ratio, total_height);
+
+        ui.allocate_ui(egui::Vec2::new(panel_width, files_height), |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("files_tree")
+                .show(ui, |ui| {
+                    for note_id in &folder_tree.root_notes {
+                        render_note_row(ui, folder, &mut selected_note, note_id, 0);
+                    }
+                    for subdir in &folder_tree.subdirs {
+                        render_dir(ui, folder, &mut selected_note, subdir, 0, &mut tree_changed);
+                    }
+                });
+        });
+
         folder.cached_tree = Some(folder_tree);
 
         if selected_note != folder.selected {
@@ -652,7 +662,27 @@ impl SideromelaneApp {
             None
         };
 
-        ui.separator();
+        // Drag handle
+        let handle_rect = ui.allocate_space(egui::Vec2::new(panel_width, HANDLE_PX)).1;
+        let handle_response = ui.interact(
+            handle_rect,
+            ui.id().with("split_handle"),
+            egui::Sense::drag(),
+        );
+        ui.painter()
+            .rect_filled(handle_rect, 0.0, egui::Color32::from_gray(60));
+        if handle_response.dragged() {
+            let new_files_height = (files_height + handle_response.drag_delta().y)
+                .clamp(80.0, total_height - 80.0 - HANDLE_PX);
+            let new_ratio = new_files_height / total_height;
+            self.app_state.set_left_pane_split_ratio(new_ratio);
+            self.app_state_dirty = true;
+        }
+        if handle_response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+
+        // Search section occupies the remaining space
         ui.heading("Search");
         ui.add(egui::TextEdit::singleline(&mut self.search_text).hint_text("Search"));
         if !folder.indexes_ready {
@@ -1335,6 +1365,13 @@ fn render_dir(
     }
 }
 
+/// Converts a split `ratio` and an available `total_height` into the pixel
+/// height for the Files section, ensuring both Files and Search each have at
+/// least 80 px and the handle itself is accounted for.
+fn clamp_split_height(ratio: f32, total_height: f32) -> f32 {
+    (ratio * total_height).clamp(80.0, total_height - 80.0 - HANDLE_PX)
+}
+
 fn walk_options_for(settings: &FolderSettings) -> WalkOptions {
     WalkOptions {
         include_dotfiles: settings.ignore.include_dotfiles,
@@ -1529,4 +1566,27 @@ fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
     }
 
     fs::copy(source_path, target_path).map(|_bytes| ())
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::clamp_split_height;
+
+    #[test]
+    fn clamp_split_height_midpoint() {
+        assert_eq!(clamp_split_height(0.5, 200.0), 100.0);
+    }
+
+    #[test]
+    fn clamp_split_height_high_ratio_clamped() {
+        // 0.99 * 200 = 198, but max = 200 - 80 - 4 = 116
+        assert_eq!(clamp_split_height(0.99, 200.0), 116.0);
+    }
+
+    #[test]
+    fn clamp_split_height_low_ratio_clamped() {
+        // 0.01 * 200 = 2, but min = 80
+        assert_eq!(clamp_split_height(0.01, 200.0), 80.0);
+    }
 }
