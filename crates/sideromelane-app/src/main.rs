@@ -28,7 +28,7 @@ use sideromelane_core::{
 use crate::indexer::{Indexer, IndexerCommand, IndexerEvent};
 use crate::io::safe_write;
 use crate::menu::{AppMenu, MenuAction};
-use crate::preferences::PreferencesWindow;
+use crate::preferences::{PreferencesWindow, validate_default_folder};
 use crate::preview::{NOTE_LINK_SCHEME, transform_wiki_links};
 use crate::state::{AppState, StartupMode};
 
@@ -427,6 +427,13 @@ impl SideromelaneApp {
     /// Open (creating if needed) the configured default folder.
     fn boot_default_folder(&mut self) {
         let default_folder = self.app_state.default_folder.clone();
+        if let Err(error) = validate_default_folder(&default_folder) {
+            self.status = format!(
+                "Default folder '{}' is restricted; pick another. ({error})",
+                default_folder.display()
+            );
+            return;
+        }
         if let Err(error) = fs::create_dir_all(&default_folder) {
             self.status = format!(
                 "Default folder unavailable ({}): {error}",
