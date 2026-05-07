@@ -688,6 +688,23 @@ impl SideromelaneApp {
     }
 }
 
+/// Returns a layouter closure that prevents text wrapping by setting
+/// `wrap.max_width = f32::INFINITY`.  Used by both editors when word-wrap is off.
+fn nowrap_layouter()
+-> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> std::sync::Arc<egui::Galley> {
+    move |ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap_width: f32| {
+        let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+        let mut job = egui::text::LayoutJob::simple(
+            text.as_str().to_owned(),
+            font_id,
+            ui.visuals().text_color(),
+            f32::INFINITY,
+        );
+        job.wrap.max_width = f32::INFINITY;
+        ui.painter().layout_job(job)
+    }
+}
+
 fn raw_editor(ui: &mut egui::Ui, note: &mut NoteRecord, word_wrap: bool) -> bool {
     let available_width = ui.available_width();
     if word_wrap {
@@ -702,6 +719,7 @@ fn raw_editor(ui: &mut egui::Ui, note: &mut NoteRecord, word_wrap: bool) -> bool
     } else {
         // Horizontal scroll: don't constrain text wrap, let the scroll area handle overflow.
         let mut changed = false;
+        let mut layouter = nowrap_layouter();
         egui::ScrollArea::horizontal().show(ui, |ui| {
             changed = ui
                 .add(
@@ -709,7 +727,8 @@ fn raw_editor(ui: &mut egui::Ui, note: &mut NoteRecord, word_wrap: bool) -> bool
                         .code_editor()
                         .desired_width(f32::INFINITY)
                         .desired_rows(32)
-                        .lock_focus(true),
+                        .lock_focus(true)
+                        .layouter(&mut layouter),
                 )
                 .changed();
         });
@@ -733,12 +752,16 @@ fn live_preview_editor(
             ui.group(|ui| {
                 if *active_block_index == Some(index) {
                     let mut text = block.text.clone();
-                    let response = ui.add(
-                        egui::TextEdit::multiline(&mut text)
-                            .code_editor()
-                            .desired_width(active_block_width)
-                            .desired_rows(block.text.lines().count().max(1)),
-                    );
+                    let mut layouter = nowrap_layouter();
+                    let widget = egui::TextEdit::multiline(&mut text)
+                        .code_editor()
+                        .desired_width(active_block_width)
+                        .desired_rows(block.text.lines().count().max(1));
+                    let response = if word_wrap {
+                        ui.add(widget)
+                    } else {
+                        ui.add(widget.layouter(&mut layouter))
+                    };
                     if response.changed() {
                         changed_block = Some((block.range.clone(), text));
                     }
