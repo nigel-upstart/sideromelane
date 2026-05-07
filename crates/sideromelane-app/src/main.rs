@@ -3,6 +3,7 @@
 mod graph_view;
 mod indexer;
 mod io;
+mod menu;
 mod outline;
 mod preferences;
 mod preview;
@@ -24,6 +25,7 @@ use sideromelane_core::{
 
 use crate::indexer::{Indexer, IndexerCommand, IndexerEvent};
 use crate::io::safe_write;
+use crate::menu::AppMenu;
 use crate::preferences::PreferencesWindow;
 use crate::preview::{NOTE_LINK_SCHEME, transform_wiki_links};
 use crate::state::{AppState, StartupMode};
@@ -85,6 +87,10 @@ struct SideromelaneApp {
     /// Set when the user clicks a `sideromelane://note/<NAME>` link in a rendered block.
     /// Drained by `main_panel` after render to navigate to the target note.
     pending_link_click: Option<String>,
+    /// Native macOS menu bar. Initialized lazily on the first frame because
+    /// `muda` needs `NSApplication` to be running before
+    /// `Menu::init_for_nsapp` can attach.
+    app_menu: Option<AppMenu>,
 }
 
 impl SideromelaneApp {
@@ -106,6 +112,7 @@ impl SideromelaneApp {
             startup_pending: true,
             commonmark_cache: CommonMarkCache::default(),
             pending_link_click: None,
+            app_menu: None,
         }
     }
 }
@@ -114,6 +121,12 @@ impl eframe::App for SideromelaneApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.indexer.is_none() {
             self.indexer = Some(Indexer::new(ui.ctx().clone()));
+        }
+        if self.app_menu.is_none() {
+            // First frame: NSApplication is up, attach the menu now.
+            let menu = AppMenu::new(&self.app_state.recent_folders);
+            menu.install_for_nsapp();
+            self.app_menu = Some(menu);
         }
         if self.startup_pending {
             self.startup_pending = false;
