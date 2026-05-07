@@ -123,29 +123,16 @@ pub fn raw_editor(
     word_wrap: bool,
     pending_jump: &mut Option<usize>,
 ) -> bool {
-    let available_width = ui.available_width();
-    let apply_jump = |response: &egui::Response, offset: usize, ui: &egui::Ui| {
-        use egui::text::{CCursor, CCursorRange};
-        use egui::widgets::text_edit::TextEditState;
-        let id = response.id;
-        let mut state = TextEditState::load(ui.ctx(), id).unwrap_or_default();
-        state
-            .cursor
-            .set_char_range(Some(CCursorRange::one(CCursor::new(offset))));
-        state.store(ui.ctx(), id);
-        response.request_focus();
-        response.scroll_to_me(Some(egui::Align::Center));
-    };
     if word_wrap {
         let response = ui.add(
             egui::TextEdit::multiline(&mut note.source)
                 .code_editor()
-                .desired_width(available_width)
+                .desired_width(ui.available_width())
                 .desired_rows(32)
                 .lock_focus(true),
         );
         if let Some(offset) = pending_jump.take() {
-            apply_jump(&response, offset, ui);
+            scroll_text_edit_to_offset(ui, &response, offset);
         }
         response.changed()
     } else {
@@ -166,10 +153,26 @@ pub fn raw_editor(
             jump_response = Some(response);
         });
         if let (Some(offset), Some(response)) = (pending_jump.take(), jump_response) {
-            apply_jump(&response, offset, ui);
+            scroll_text_edit_to_offset(ui, &response, offset);
         }
         changed
     }
+}
+
+/// Position the cursor at `offset` inside the `TextEdit` whose response was
+/// just rendered, focus it, and scroll it into view. Lets the outline-jump
+/// flow (Spec 0002 AC-1) reach into a `TextEdit`'s state from the outside.
+fn scroll_text_edit_to_offset(ui: &egui::Ui, response: &egui::Response, offset: usize) {
+    use egui::text::{CCursor, CCursorRange};
+    use egui::widgets::text_edit::TextEditState;
+    let id = response.id;
+    let mut state = TextEditState::load(ui.ctx(), id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(CCursorRange::one(CCursor::new(offset))));
+    state.store(ui.ctx(), id);
+    response.request_focus();
+    response.scroll_to_me(Some(egui::Align::Center));
 }
 
 #[allow(clippy::too_many_arguments)]
