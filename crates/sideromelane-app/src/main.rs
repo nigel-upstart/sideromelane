@@ -5,6 +5,7 @@ mod graph_view;
 mod indexer;
 mod io;
 mod outline;
+mod preferences;
 mod state;
 mod tree;
 
