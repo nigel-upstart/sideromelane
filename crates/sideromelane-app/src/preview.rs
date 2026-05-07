@@ -15,9 +15,6 @@
 //! same char, ≥ opening length). Keeping a small local scanner avoids exposing the core
 //! helper just for one caller.
 
-// The pre-pass functions are wired up to `live_preview_editor` in the next commit.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::ops::Range;
 use std::path::Path;
 
