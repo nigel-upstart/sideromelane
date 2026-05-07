@@ -465,7 +465,12 @@ impl SideromelaneApp {
         let Some(folder) = self.folder.as_mut() else {
             return;
         };
-        let (note_id, absolute_path) = next_untitled_note(&folder.root);
+        let Some((note_id, absolute_path)) = next_untitled_note(&folder.root) else {
+            self.status = format!(
+                "Couldn't find an unused Untitled.md name (tried {NEXT_UNTITLED_NOTE_MAX_ATTEMPTS})"
+            );
+            return;
+        };
         let source = format!("# {}\n", note_id.file_stem());
         folder.notes.push(NoteRecord {
             note_id,
@@ -1946,8 +1951,14 @@ fn auto_save_dirty_notes(
     sweep
 }
 
-fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
-    for index in 0.. {
+/// Maximum number of `Untitled N.md` collisions we will probe before giving
+/// up. A folder with this many existing untitled notes is so far past
+/// reasonable that it almost certainly indicates a buggy caller or a
+/// hostile filesystem rather than legitimate use.
+const NEXT_UNTITLED_NOTE_MAX_ATTEMPTS: u32 = 10_000;
+
+fn next_untitled_note(root: &Path) -> Option<(NoteId, PathBuf)> {
+    for index in 0..NEXT_UNTITLED_NOTE_MAX_ATTEMPTS {
         let file_name = if index == 0 {
             String::from("Untitled.md")
         } else {
@@ -1958,11 +1969,11 @@ fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
         if !absolute_path.exists()
             && let Ok(note_id) = NoteId::from_folder_relative_path(PathBuf::from(file_name))
         {
-            return (note_id, absolute_path);
+            return Some((note_id, absolute_path));
         }
     }
 
-    unreachable!("unbounded loop returns before exhausting usize");
+    None
 }
 
 fn is_image_path(path: &Path) -> bool {
