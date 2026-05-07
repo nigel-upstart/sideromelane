@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+jobs:
+  release:
+    name: Build and publish macOS release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build .app bundle
+        run: ./scripts/package-macos-app.sh
+
+      - name: Inject version into Info.plist
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleShortVersionString ${VERSION}" \
+            -c "Set :CFBundleVersion ${VERSION}" \
+            target/package/Sideromelane.app/Contents/Info.plist
+
+      - name: Archive .app bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd target/package
+          ditto -c -k --sequesterRsrc --keepParent \
+            Sideromelane.app \
+            "Sideromelane-${VERSION}-macos.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/package/Sideromelane-*-macos.zip
+          generate_release_notes: true
