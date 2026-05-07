@@ -1,190 +1,170 @@
-//! Graph-view paint code with pan/zoom and selection.
+//! Graph-view widget rendered via [`egui_graphs`].
 //!
-//! Holds [`GraphViewState`] across frames so positions don't shift unless the
-//! underlying graph snapshot changes.
+//! Shows the depth-bounded neighborhood of the currently focused note. The
+//! underlying [`egui_graphs::Graph`] is rebuilt only when the focus or the
+//! observed neighborhood signature changes; otherwise the widget reuses the
+//! cached graph so node positions stay stable across frames.
 
 use std::collections::BTreeMap;
 
-use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Vec2};
-use sideromelane_core::{FolderIndex, NoteId};
+use eframe::egui::{self, Pos2};
+use egui_graphs::{
+    DefaultEdgeShape, DefaultNodeShape, FruchtermanReingold, FruchtermanReingoldState, Graph,
+    GraphView, LayoutForceDirected, SettingsInteraction, SettingsStyle,
+};
+use petgraph::{Directed, stable_graph::DefaultIx};
+use sideromelane_core::{FolderIndex, Neighborhood, NoteId};
 
-use crate::graph_layout::{LayoutParams, fruchterman_reingold};
+/// Default hop radius for the focus-scoped graph view.
+pub const DEFAULT_DEPTH: usize = 1;
 
-/// Persistent graph-view UI state. Owned by the app.
-#[derive(Debug, Clone)]
+/// Concrete `egui_graphs` graph type with `NoteId` payloads, force-directed
+/// layout state, and the default node/edge shapes.
+type NoteGraph = Graph<NoteId, (), Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>;
+
+/// Concrete `egui_graphs` widget that pairs with [`NoteGraph`].
+type NoteGraphView<'a> = GraphView<
+    'a,
+    NoteId,
+    (),
+    Directed,
+    DefaultIx,
+    DefaultNodeShape,
+    DefaultEdgeShape,
+    FruchtermanReingoldState,
+    LayoutForceDirected<FruchtermanReingold>,
+>;
+
+/// Persistent graph-view state. Owned by the app.
+#[derive(Debug, Default)]
 pub struct GraphViewState {
-    /// Pan offset in screen pixels.
-    pan: Vec2,
-    /// Zoom factor (1.0 = base scale where the unit square fills the view).
-    zoom: f32,
-    /// Cached layout in unit-square coordinates, regenerated when the graph
-    /// signature changes.
-    positions: BTreeMap<NoteId, Pos2>,
-    /// Edges captured alongside the positions.
-    edges: Vec<(NoteId, NoteId)>,
-    /// Hash of the graph snapshot used to produce the current positions, so
-    /// we know when to recompute.
-    signature: GraphSignature,
+    /// Cached force-directed graph snapshot. Rebuilt when [`Self::signature`]
+    /// changes; reused frame-to-frame so the layout simulation can settle.
+    cached: Option<NoteGraph>,
+    /// Identity of the cached snapshot — focus + neighborhood node/edge set.
+    /// Comparing against this lets us skip the rebuild on most frames.
+    signature: Option<NeighborhoodSignature>,
+    /// Last set of selected node indices observed from the widget. Used to
+    /// detect a fresh selection (i.e. a click on a node) and surface the
+    /// corresponding `NoteId` to the caller.
+    last_selection: Vec<petgraph::stable_graph::NodeIndex>,
 }
 
-impl Default for GraphViewState {
-    fn default() -> Self {
-        Self {
-            pan: Vec2::ZERO,
-            zoom: 1.0,
-            positions: BTreeMap::new(),
-            edges: Vec::new(),
-            signature: GraphSignature::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct GraphSignature {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NeighborhoodSignature {
+    focus: NoteId,
     nodes: Vec<NoteId>,
     edges: Vec<(NoteId, NoteId)>,
 }
 
-impl GraphSignature {
-    fn from_index(folder_index: &FolderIndex) -> Self {
-        let mut nodes: Vec<NoteId> = folder_index
-            .graph()
-            .nodes()
-            .iter()
-            .map(|node| node.note_id().clone())
-            .collect();
+impl NeighborhoodSignature {
+    fn new(focus: &NoteId, neighborhood: &Neighborhood) -> Self {
+        let mut nodes = neighborhood.nodes.clone();
         nodes.sort();
-        let mut edges: Vec<(NoteId, NoteId)> = folder_index
-            .graph()
-            .edges()
-            .iter()
-            .map(|edge| (edge.source().clone(), edge.target().clone()))
-            .collect();
+        let mut edges = neighborhood.edges.clone();
         edges.sort();
-        Self { nodes, edges }
+        Self {
+            focus: focus.clone(),
+            nodes,
+            edges,
+        }
     }
 }
 
-/// Paints the graph view into `ui` and returns the note id that was clicked,
-/// if any.
+/// Paints the focus-scoped graph view into `ui` and returns the note id that
+/// was clicked, if any.
+///
+/// `depth` is the hop radius used to compute the neighborhood. When `focus` is
+/// `None` the view renders an empty placeholder.
 pub fn draw(
     ui: &mut egui::Ui,
     state: &mut GraphViewState,
     folder_index: &FolderIndex,
-    selected: Option<&NoteId>,
+    focus: Option<&NoteId>,
+    depth: usize,
 ) -> Option<NoteId> {
-    let signature = GraphSignature::from_index(folder_index);
-
-    // Recompute layout only when the graph snapshot changes.
-    if signature != state.signature {
-        state.positions =
-            fruchterman_reingold(&signature.nodes, &signature.edges, &LayoutParams::default());
-        state.edges.clone_from(&signature.edges);
-        state.signature = signature;
-    }
-
-    let desired_size = Vec2::new(ui.available_width(), 320.0);
-    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
-    let painter = ui.painter_at(rect);
-
-    // Drag updates pan; scroll updates zoom centered on the pointer.
-    if response.dragged() {
-        state.pan += response.drag_delta();
-    }
-    if response.hovered() {
-        let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-        if scroll.abs() > f32::EPSILON {
-            let factor = (scroll * 0.01).exp();
-            state.zoom = (state.zoom * factor).clamp(0.25, 8.0);
-        }
-    }
-
-    // Background.
-    painter.rect_filled(rect, 4.0, Color32::from_gray(20));
-
-    if state.positions.is_empty() {
+    let Some(focus) = focus else {
+        ui.centered_and_justified(|ui| {
+            ui.label("Select a note to view its graph");
+        });
+        state.cached = None;
+        state.signature = None;
+        state.last_selection.clear();
         return None;
-    }
-
-    let to_screen = |unit: Pos2| -> Pos2 {
-        // Center the unit square in `rect`, scaled by zoom and shifted by pan.
-        let base = rect.width().min(rect.height()) * 0.9 * state.zoom;
-        let center = rect.center();
-        Pos2::new(
-            (unit.x - 0.5).mul_add(base, center.x + state.pan.x),
-            (unit.y - 0.5).mul_add(base, center.y + state.pan.y),
-        )
     };
 
-    // Edges first so nodes paint on top.
-    for (source, target) in &state.edges {
-        let Some(source_position) = state.positions.get(source).copied() else {
-            continue;
-        };
-        let Some(target_position) = state.positions.get(target).copied() else {
-            continue;
-        };
-        painter.line_segment(
-            [to_screen(source_position), to_screen(target_position)],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(140, 140, 160, 90)),
+    let neighborhood = folder_index.neighborhood(focus, depth);
+    let signature = NeighborhoodSignature::new(focus, &neighborhood);
+
+    if state.signature.as_ref() != Some(&signature) {
+        state.cached = Some(build_graph(focus, &neighborhood));
+        state.signature = Some(signature);
+        state.last_selection.clear();
+    }
+
+    let graph = state.cached.as_mut()?;
+
+    let mut widget = NoteGraphView::new(graph)
+        .with_styles(&SettingsStyle::default().with_labels_always(true))
+        .with_interactions(
+            &SettingsInteraction::default()
+                .with_node_selection_enabled(true)
+                .with_dragging_enabled(true),
         );
-    }
+    ui.add(&mut widget);
 
-    // Compute degree to size nodes.
-    let mut degree: BTreeMap<&NoteId, usize> = BTreeMap::new();
-    for (source, target) in &state.edges {
-        *degree.entry(source).or_default() += 1;
-        *degree.entry(target).or_default() += 1;
-    }
+    detect_clicked_note(graph, &mut state.last_selection)
+}
 
-    // Show labels only when zoomed in or hovering.
-    let labels_visible = state.zoom >= 1.5;
-    let hover_position = response.hover_pos();
+/// Builds an [`egui_graphs::Graph`] from the supplied neighborhood. Layout is
+/// not seeded — the force-directed simulation produces positions on first
+/// draw and they persist via the cache.
+fn build_graph(focus: &NoteId, neighborhood: &Neighborhood) -> NoteGraph {
+    let mut graph = NoteGraph::new(petgraph::stable_graph::StableGraph::default());
+    let mut indices = BTreeMap::new();
 
-    let mut clicked_note: Option<NoteId> = None;
-
-    for (note_id, unit_position) in &state.positions {
-        let position = to_screen(*unit_position);
-        let node_degree = degree.get(note_id).copied().unwrap_or(0);
-        #[allow(clippy::cast_precision_loss)]
-        let radius =
-            (node_degree as f32).sqrt().mul_add(1.2, 3.0).min(14.0) * state.zoom.clamp(0.5, 1.5);
-        let is_selected = selected == Some(note_id);
-        let fill = if is_selected {
-            Color32::from_rgb(220, 110, 110)
+    for note_id in &neighborhood.nodes {
+        // Seed each node near the origin so the simulation starts from a
+        // small cluster and expands; the focus stays at (0, 0) as a hint.
+        let location = if note_id == focus {
+            Pos2::ZERO
         } else {
-            Color32::from_rgb(100, 140, 200)
+            // Spread initial positions slightly so the algorithm has a
+            // gradient to work against on the first step.
+            Pos2::new(0.0, 0.0)
         };
-        painter.circle_filled(position, radius, fill);
-        if is_selected {
-            painter.circle_stroke(position, radius + 2.0, Stroke::new(1.5, Color32::WHITE));
-        }
+        let idx = graph.add_node_with_label_and_location(
+            note_id.clone(),
+            note_id.file_stem().to_owned(),
+            location,
+        );
+        indices.insert(note_id.clone(), idx);
+    }
 
-        let near_pointer =
-            hover_position.is_some_and(|hover| hover.distance(position) <= radius + 4.0);
-        if labels_visible || near_pointer {
-            painter.text(
-                position + Vec2::new(radius + 4.0, -radius),
-                egui::Align2::LEFT_TOP,
-                note_id.file_stem(),
-                egui::FontId::proportional(11.0),
-                Color32::from_gray(220),
-            );
-        }
-
-        if response.clicked()
-            && let Some(pointer_pos) = response.interact_pointer_pos()
-            && pointer_pos.distance(position) <= radius + 4.0
-        {
-            clicked_note = Some(note_id.clone());
+    for (source, target) in &neighborhood.edges {
+        if let (Some(source_idx), Some(target_idx)) = (indices.get(source), indices.get(target)) {
+            graph.add_edge(*source_idx, *target_idx, ());
         }
     }
 
-    // Reset zoom and pan with double-click.
-    if response.double_clicked() {
-        state.pan = Vec2::ZERO;
-        state.zoom = 1.0;
-    }
+    graph
+}
 
-    clicked_note
+/// Returns the `NoteId` of a node that became newly selected this frame, if
+/// any. Selecting the same node again (or clearing the selection) returns
+/// `None`.
+fn detect_clicked_note(
+    graph: &NoteGraph,
+    last_selection: &mut Vec<petgraph::stable_graph::NodeIndex>,
+) -> Option<NoteId> {
+    let current = graph.selected_nodes();
+    let newly_selected = current
+        .iter()
+        .find(|idx| !last_selection.contains(idx))
+        .copied();
+
+    last_selection.clear();
+    last_selection.extend_from_slice(current);
+
+    newly_selected.and_then(|idx| graph.node(idx).map(|node| node.payload().clone()))
 }

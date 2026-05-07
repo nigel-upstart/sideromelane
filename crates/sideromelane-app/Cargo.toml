@@ -19,6 +19,8 @@ workspace = true
 
 [dependencies]
 eframe            = "0.34.2"
+egui_graphs       = "0.30.0"
+petgraph          = "0.8"
 rfd               = "0.17.2"
 sideromelane-core = { path = "../sideromelane-core", version = "0.1.0" }
 
