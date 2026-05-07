@@ -50,6 +50,9 @@ struct SideromelaneApp {
     mode: EditorMode,
     search_text: String,
     active_block_index: Option<usize>,
+    /// Byte offset to jump to on the next frame. Set by outline row clicks;
+    /// consumed by `raw_editor` / `live_preview_editor`.
+    pending_jump: Option<usize>,
     status: String,
     indexer: Option<Indexer>,
     graph_view: graph_view::GraphViewState,
@@ -598,6 +601,10 @@ impl SideromelaneApp {
         ui.separator();
         ui.heading("Outline");
         if let Some(parsed_note) = folder.selected_parsed_note() {
+            let source = folder
+                .selected_note()
+                .map(|n| n.source.clone())
+                .unwrap_or_default();
             let analysis = NoteAnalysis::from_note(&parsed_note);
             let base_font = ui
                 .style()
@@ -610,15 +617,20 @@ impl SideromelaneApp {
                     continue;
                 }
                 let level = heading.level();
-                ui.horizontal(|ui| {
+                let response = ui.horizontal(|ui| {
                     ui.add_space(outline::heading_indent_px(level));
-                    let mut rich = egui::RichText::new(display)
+                    let mut rich = egui::RichText::new(&display)
                         .size(outline::heading_font_size(level, base_font));
                     if outline::heading_is_bold(level) {
                         rich = rich.strong();
                     }
-                    ui.label(rich);
+                    ui.add(egui::Label::new(rich).sense(egui::Sense::click()))
                 });
+                if response.inner.clicked()
+                    && let Some(offset) = outline::byte_offset_for_heading(&source, level, &display)
+                {
+                    self.pending_jump = Some(offset);
+                }
             }
         }
 
@@ -671,12 +683,18 @@ impl SideromelaneApp {
 
         let word_wrap = folder.settings.ui.editor_word_wrap;
         let changed = match self.mode {
-            EditorMode::Raw => raw_editor(ui, &mut folder.notes[index], word_wrap),
+            EditorMode::Raw => raw_editor(
+                ui,
+                &mut folder.notes[index],
+                word_wrap,
+                &mut self.pending_jump,
+            ),
             EditorMode::LivePreview => live_preview_editor(
                 ui,
                 &mut folder.notes[index],
                 &mut self.active_block_index,
                 word_wrap,
+                &mut self.pending_jump,
             ),
         };
 
@@ -688,31 +706,55 @@ impl SideromelaneApp {
     }
 }
 
-fn raw_editor(ui: &mut egui::Ui, note: &mut NoteRecord, word_wrap: bool) -> bool {
+fn raw_editor(
+    ui: &mut egui::Ui,
+    note: &mut NoteRecord,
+    word_wrap: bool,
+    pending_jump: &mut Option<usize>,
+) -> bool {
     let available_width = ui.available_width();
+    let apply_jump = |response: &egui::Response, offset: usize, ui: &egui::Ui| {
+        use egui::text::{CCursor, CCursorRange};
+        use egui::widgets::text_edit::TextEditState;
+        let id = response.id;
+        let mut state = TextEditState::load(ui.ctx(), id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(offset))));
+        state.store(ui.ctx(), id);
+        response.request_focus();
+        response.scroll_to_me(Some(egui::Align::Center));
+    };
     if word_wrap {
-        ui.add(
+        let response = ui.add(
             egui::TextEdit::multiline(&mut note.source)
                 .code_editor()
                 .desired_width(available_width)
                 .desired_rows(32)
                 .lock_focus(true),
-        )
-        .changed()
+        );
+        if let Some(offset) = pending_jump.take() {
+            apply_jump(&response, offset, ui);
+        }
+        response.changed()
     } else {
         // Horizontal scroll: don't constrain text wrap, let the scroll area handle overflow.
         let mut changed = false;
+        let mut jump_response: Option<egui::Response> = None;
         egui::ScrollArea::horizontal().show(ui, |ui| {
-            changed = ui
-                .add(
-                    egui::TextEdit::multiline(&mut note.source)
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(32)
-                        .lock_focus(true),
-                )
-                .changed();
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut note.source)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(32)
+                    .lock_focus(true),
+            );
+            changed = response.changed();
+            jump_response = Some(response);
         });
+        if let (Some(offset), Some(response)) = (pending_jump.take(), jump_response) {
+            apply_jump(&response, offset, ui);
+        }
         changed
     }
 }
@@ -722,15 +764,25 @@ fn live_preview_editor(
     note: &mut NoteRecord,
     active_block_index: &mut Option<usize>,
     word_wrap: bool,
+    pending_jump: &mut Option<usize>,
 ) -> bool {
     let blocks = markdown_blocks(&note.source);
+
+    // Resolve a pending jump to a block index before rendering.
+    if let Some(offset) = pending_jump.take() {
+        *active_block_index = blocks
+            .iter()
+            .position(|b| b.range.start <= offset && offset < b.range.end)
+            .or(if blocks.is_empty() { None } else { Some(0) });
+    }
+
     let mut changed_block = None;
     let pane_width = ui.available_width();
     let active_block_width = if word_wrap { pane_width } else { f32::INFINITY };
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (index, block) in blocks.iter().enumerate() {
-            ui.group(|ui| {
+            let group_response = ui.group(|ui| {
                 if *active_block_index == Some(index) {
                     let mut text = block.text.clone();
                     let response = ui.add(
@@ -749,6 +801,13 @@ fn live_preview_editor(
                     }
                 }
             });
+            // Scroll the active block into view when it was just activated via
+            // a pending jump.
+            if *active_block_index == Some(index) {
+                group_response
+                    .response
+                    .scroll_to_me(Some(egui::Align::Center));
+            }
         }
     });
 

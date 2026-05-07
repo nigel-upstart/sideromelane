@@ -4,6 +4,8 @@
 //! These helpers strip emphasis markers for display only and supply per-level
 //! font sizes so the outline reads as a hierarchy.
 
+use sideromelane_core::non_fence_ranges;
+
 fn strip_emphasis_prefix(s: &str) -> Option<&str> {
     for prefix in ["**", "__", "*", "_"] {
         if let Some(stripped) = s.strip_prefix(prefix) {
@@ -69,6 +71,36 @@ pub fn heading_indent_px(level: u8) -> f32 {
     f32::from(level.saturating_sub(1)) * 8.0
 }
 
+/// Returns the byte offset in `source` of the first heading line whose parsed
+/// level equals `level` and whose display text equals `text` (after applying
+/// `display_heading_text`). Lines inside fenced code blocks are skipped.
+///
+/// Returns `None` if no matching heading is found.
+#[must_use]
+pub fn byte_offset_for_heading(source: &str, level: u8, text: &str) -> Option<usize> {
+    for range in non_fence_ranges(source) {
+        let segment = &source[range.clone()];
+        let mut offset = range.start;
+        for line in segment.lines() {
+            let line_level = line.bytes().take_while(|&b| b == b'#').count();
+            if (1..=6).contains(&line_level)
+                && line.as_bytes().get(line_level) == Some(&b' ')
+                && u8::try_from(line_level).ok() == Some(level)
+                && display_heading_text(line) == text
+            {
+                return Some(offset);
+            }
+            // Advance past this line plus its newline (if present in source).
+            offset += line.len();
+            // Account for the '\n' that `lines()` strips.
+            if source.as_bytes().get(offset) == Some(&b'\n') {
+                offset += 1;
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +163,36 @@ mod tests {
         // Outline never sees raw lines without `#`, but the helper should be
         // robust if it ever does.
         assert_eq!(display_heading_text("Plain"), "Plain");
+    }
+
+    #[test]
+    fn byte_offset_simple_match() {
+        let source = "# Alpha\n## Beta\n# Gamma\n";
+        // "Beta" is an h2, starts at byte 8.
+        let offset = byte_offset_for_heading(source, 2, "Beta");
+        assert_eq!(offset, Some(8));
+    }
+
+    #[test]
+    fn byte_offset_skips_fence_fake_heading() {
+        let source = "# Real\n```\n# Fake\n```\n";
+        // Only the real h1 "Real" should match; the one inside the fence should not.
+        assert_eq!(byte_offset_for_heading(source, 1, "Real"), Some(0));
+        assert_eq!(byte_offset_for_heading(source, 1, "Fake"), None);
+    }
+
+    #[test]
+    fn byte_offset_mismatched_level_returns_none() {
+        let source = "# Title\n";
+        // Correct text but wrong level should return None.
+        assert_eq!(byte_offset_for_heading(source, 2, "Title"), None);
+    }
+
+    #[test]
+    fn byte_offset_first_of_two_duplicates() {
+        let source = "# Dup\nsome text\n# Dup\n";
+        // Returns the first occurrence at byte 0, not the second.
+        assert_eq!(byte_offset_for_heading(source, 1, "Dup"), Some(0));
     }
 
     #[test]
