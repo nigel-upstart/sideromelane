@@ -276,6 +276,12 @@ struct FolderState {
     /// preserves the user's explicit expand/collapse choices, and dedup'd via
     /// the set rather than appended every frame.
     auto_expanded: std::collections::BTreeSet<String>,
+    /// Maps each note's absolute path to its index in `notes`. Refreshed
+    /// whenever `notes` is mutated (`merge_discovered_notes`, `new_note`).
+    /// Lets `classify_watch_event` resolve a watcher event in O(1) rather
+    /// than scanning the full note set per event — important when a `git
+    /// pull` produces a burst spanning hundreds of files.
+    note_path_index: HashMap<PathBuf, usize>,
 }
 
 impl FolderState {
@@ -292,6 +298,7 @@ impl FolderState {
         let (notes, selected) =
             initial.map_or_else(|| (Vec::new(), None), |record| (vec![record], Some(0)));
 
+        let note_path_index = build_note_path_index(&notes);
         Ok(Self {
             root,
             notes,
@@ -302,7 +309,14 @@ impl FolderState {
             indexes_ready: false,
             cached_tree: None,
             auto_expanded: std::collections::BTreeSet::new(),
+            note_path_index,
         })
+    }
+
+    /// Rebuild `note_path_index` from `notes`. Call after any mutation that
+    /// changes the set or order of notes.
+    fn rebuild_note_path_index(&mut self) {
+        self.note_path_index = build_note_path_index(&self.notes);
     }
 
     fn selected_note(&self) -> Option<&NoteRecord> {
@@ -467,6 +481,10 @@ impl SideromelaneApp {
         };
         let (note_id, absolute_path) = next_untitled_note(&folder.root);
         let source = format!("# {}\n", note_id.file_stem());
+        let new_index = folder.notes.len();
+        folder
+            .note_path_index
+            .insert(absolute_path.clone(), new_index);
         folder.notes.push(NoteRecord {
             note_id,
             absolute_path,
@@ -474,7 +492,7 @@ impl SideromelaneApp {
             dirty: true,
             last_edit_at: Instant::now(),
         });
-        folder.selected = Some(folder.notes.len() - 1);
+        folder.selected = Some(new_index);
         folder.cached_tree = None;
         let scan_root = folder.root.clone();
         self.active_block_index = None;
@@ -652,6 +670,7 @@ impl SideromelaneApp {
         match classify_watch_event(
             event,
             &folder.notes,
+            &folder.note_path_index,
             &self.last_self_write_at,
             SELF_WRITE_SUPPRESS_WINDOW,
             now,
@@ -1789,6 +1808,17 @@ fn merge_discovered_notes(folder: &mut FolderState, discovered: Vec<indexer::Not
         folder.selected = Some(0);
     }
     folder.notes = merged;
+    folder.rebuild_note_path_index();
+}
+
+/// Build a `(absolute_path -> index)` map for `notes`. Used as the watcher
+/// event lookup table so `classify_watch_event` is O(1) per event.
+fn build_note_path_index(notes: &[NoteRecord]) -> HashMap<PathBuf, usize> {
+    notes
+        .iter()
+        .enumerate()
+        .map(|(index, note)| (note.absolute_path.clone(), index))
+        .collect()
 }
 
 /// One successfully auto-saved note. Owns clones of the fields the caller
@@ -1819,6 +1849,7 @@ enum WatchOutcome {
 fn classify_watch_event(
     event: &watcher::WatchEvent,
     notes: &[NoteRecord],
+    note_path_index: &HashMap<PathBuf, usize>,
     last_self_write_at: &HashMap<PathBuf, Instant>,
     suppress_window: Duration,
     now: Instant,
@@ -1833,16 +1864,17 @@ fn classify_watch_event(
     {
         return WatchOutcome::Suppressed;
     }
-    let target_index = notes
-        .iter()
-        .position(|note| note.absolute_path == event.path)
-        .or_else(|| {
-            event.path.file_name().and_then(|name| {
-                notes
-                    .iter()
-                    .position(|note| note.absolute_path.file_name() == Some(name))
-            })
-        });
+    // Fast path: O(1) lookup against the precomputed index. The file-name
+    // fallback below is retained as a defensive net for symlinked paths /
+    // case-mismatched parents reported by some platform watchers; W1 will
+    // remove it in a follow-up commit.
+    let target_index = note_path_index.get(&event.path).copied().or_else(|| {
+        event.path.file_name().and_then(|name| {
+            notes
+                .iter()
+                .position(|note| note.absolute_path.file_name() == Some(name))
+        })
+    });
     match target_index {
         None => WatchOutcome::UnknownPath,
         Some(index) if notes[index].dirty => WatchOutcome::Conflict(notes[index].note_id.clone()),
@@ -2127,7 +2159,7 @@ mod tests {
     fn watch_clean_note_classified_as_reload() {
         use std::collections::HashMap;
 
-        use super::{WatchOutcome, classify_watch_event, watcher};
+        use super::{WatchOutcome, build_note_path_index, classify_watch_event, watcher};
 
         let directory = TempDir::new().expect("tempdir");
         let path = directory.path().join("Clean.md");
@@ -2135,10 +2167,12 @@ mod tests {
         let mut record = note_record(path.clone(), "in memory", Instant::now());
         record.dirty = false;
         let notes = vec![record];
+        let index = build_note_path_index(&notes);
 
         let outcome = classify_watch_event(
             &watch_event(path, watcher::WatchKind::Modify),
             &notes,
+            &index,
             &HashMap::new(),
             Duration::from_millis(200),
             Instant::now(),
@@ -2150,7 +2184,7 @@ mod tests {
     fn watch_dirty_note_classified_as_conflict() {
         use std::collections::HashMap;
 
-        use super::{WatchOutcome, classify_watch_event, watcher};
+        use super::{WatchOutcome, build_note_path_index, classify_watch_event, watcher};
 
         let directory = TempDir::new().expect("tempdir");
         let path = directory.path().join("Dirty.md");
@@ -2158,10 +2192,12 @@ mod tests {
         let record = note_record(path.clone(), "in memory", Instant::now());
         let expected = record.note_id.clone();
         let notes = vec![record];
+        let index = build_note_path_index(&notes);
 
         let outcome = classify_watch_event(
             &watch_event(path, watcher::WatchKind::Modify),
             &notes,
+            &index,
             &HashMap::new(),
             Duration::from_millis(200),
             Instant::now(),
@@ -2173,7 +2209,7 @@ mod tests {
     fn watch_event_within_self_write_window_suppressed() {
         use std::collections::HashMap;
 
-        use super::{WatchOutcome, classify_watch_event, watcher};
+        use super::{WatchOutcome, build_note_path_index, classify_watch_event, watcher};
 
         let directory = TempDir::new().expect("tempdir");
         let path = directory.path().join("Recent.md");
@@ -2181,6 +2217,7 @@ mod tests {
         let mut record = note_record(path.clone(), "in memory", Instant::now());
         record.dirty = false;
         let notes = vec![record];
+        let index = build_note_path_index(&notes);
 
         let now = Instant::now();
         let mut self_writes = HashMap::new();
@@ -2193,6 +2230,7 @@ mod tests {
         let outcome = classify_watch_event(
             &watch_event(path, watcher::WatchKind::Modify),
             &notes,
+            &index,
             &self_writes,
             Duration::from_millis(200),
             now,
@@ -2204,17 +2242,19 @@ mod tests {
     fn watch_event_for_unknown_path_classified_as_unknown() {
         use std::collections::HashMap;
 
-        use super::{WatchOutcome, classify_watch_event, watcher};
+        use super::{WatchOutcome, build_note_path_index, classify_watch_event, watcher};
 
         let directory = TempDir::new().expect("tempdir");
         let known_path = directory.path().join("Known.md");
         let unknown_path = directory.path().join("Unrelated.md");
         fs::write(&known_path, "x").expect("seed");
         let notes = vec![note_record(known_path, "in memory", Instant::now())];
+        let index = build_note_path_index(&notes);
 
         let outcome = classify_watch_event(
             &watch_event(unknown_path, watcher::WatchKind::Modify),
             &notes,
+            &index,
             &HashMap::new(),
             Duration::from_millis(200),
             Instant::now(),
@@ -2226,20 +2266,66 @@ mod tests {
     fn watch_other_kind_event_classified_as_ignored() {
         use std::collections::HashMap;
 
-        use super::{WatchOutcome, classify_watch_event, watcher};
+        use super::{WatchOutcome, build_note_path_index, classify_watch_event, watcher};
 
         let directory = TempDir::new().expect("tempdir");
         let path = directory.path().join("Note.md");
         fs::write(&path, "x").expect("seed");
         let notes = vec![note_record(path.clone(), "in memory", Instant::now())];
+        let index = build_note_path_index(&notes);
 
         let outcome = classify_watch_event(
             &watch_event(path, watcher::WatchKind::Other),
             &notes,
+            &index,
             &HashMap::new(),
             Duration::from_millis(200),
             Instant::now(),
         );
         assert_eq!(outcome, WatchOutcome::Ignored);
+    }
+
+    #[test]
+    fn note_path_index_lookup_matches_iteration() {
+        use std::collections::HashMap;
+
+        use super::{WatchOutcome, build_note_path_index, classify_watch_event, watcher};
+
+        let directory = TempDir::new().expect("tempdir");
+        let path_a = directory.path().join("A.md");
+        let path_b = directory.path().join("B.md");
+        let path_c = directory.path().join("C.md");
+        for path in [&path_a, &path_b, &path_c] {
+            fs::write(path, "x").expect("seed");
+        }
+        let mut notes = vec![
+            note_record(path_a.clone(), "a", Instant::now()),
+            note_record(path_b.clone(), "b", Instant::now()),
+            note_record(path_c.clone(), "c", Instant::now()),
+        ];
+        for note in &mut notes {
+            note.dirty = false;
+        }
+        let index = build_note_path_index(&notes);
+
+        for (expected_idx, path) in [&path_a, &path_b, &path_c].iter().enumerate() {
+            let scanned = notes.iter().position(|note| &&note.absolute_path == path);
+            assert_eq!(scanned, Some(expected_idx));
+
+            let outcome = classify_watch_event(
+                &watch_event((*path).clone(), watcher::WatchKind::Modify),
+                &notes,
+                &index,
+                &HashMap::new(),
+                Duration::from_millis(200),
+                Instant::now(),
+            );
+            assert_eq!(
+                outcome,
+                WatchOutcome::Reload {
+                    index: expected_idx
+                }
+            );
+        }
     }
 }
