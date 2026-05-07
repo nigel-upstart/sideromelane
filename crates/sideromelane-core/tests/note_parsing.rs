@@ -1,6 +1,6 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use sideromelane_core::{MarkdownNote, MetadataValue, NoteId};
+use sideromelane_core::{MarkdownNote, MetadataValue, NoteId, Tag};
 
 /// Fixture path helper.
 fn fixture(relative: &str) -> std::path::PathBuf {
@@ -106,6 +106,23 @@ fn malformed_quoted_comma_list_does_not_panic() {
         "tags field must parse as a list; got: {:?}",
         fm.get("tags")
     );
+}
+
+#[test]
+fn frontmatter_tags_drops_invalid_entries_silently() {
+    let note_id = NoteId::from_folder_relative_path("test.md").unwrap();
+    let note = MarkdownNote::parse(note_id, "---\ntags: [kubernetes, foo bar, datadog]\n---\n");
+    let tags = note.frontmatter().unwrap().tags();
+    let names: Vec<&str> = tags.iter().map(Tag::name).collect();
+    // "foo bar" contains a space — invalid — so it is silently dropped.
+    assert_eq!(names, ["kubernetes", "datadog"]);
+}
+
+#[test]
+fn frontmatter_tags_returns_empty_for_note_without_tags_field() {
+    let note_id = NoteId::from_folder_relative_path("test.md").unwrap();
+    let note = MarkdownNote::parse(note_id, "---\ntitle: No Tags\n---\n");
+    assert!(note.frontmatter().unwrap().tags().is_empty());
 }
 
 #[test]

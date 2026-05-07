@@ -1,6 +1,8 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use sideromelane_core::{Heading, ImageEmbed, MarkdownNote, NoteAnalysis, NoteId, WikiLink};
+use sideromelane_core::{
+    Heading, ImageEmbed, MarkdownNote, NoteAnalysis, NoteId, Tag, WikiLink, merged_tags,
+};
 
 /// Fixture path helper.
 fn fixture(relative: &str) -> std::path::PathBuf {
@@ -150,4 +152,32 @@ fn wiki_link_alias_and_anchor_are_parsed() {
     assert_eq!(links[3].target(), "Bare");
     assert_eq!(links[3].anchor(), None);
     assert_eq!(links[3].alias(), None);
+}
+
+#[test]
+fn merged_tags_returns_sorted_deduplicated_union_of_frontmatter_and_inline() {
+    let note_id = NoteId::from_folder_relative_path("notes/K8s.md").unwrap();
+    let note = MarkdownNote::parse(
+        note_id,
+        "---\ntags: [datadog, kubernetes]\n---\n\nSee #kubernetes and #sumologic.\n",
+    );
+    let analysis = NoteAnalysis::from_note(&note);
+    let tags = merged_tags(&note, &analysis);
+    let names: Vec<&str> = tags.iter().map(Tag::name).collect();
+    // frontmatter: [datadog, kubernetes]; inline: [kubernetes, sumologic]
+    // union, sorted, deduped → [datadog, kubernetes, sumologic]
+    assert_eq!(names, ["datadog", "kubernetes", "sumologic"]);
+}
+
+#[test]
+fn merged_tags_with_only_inline_tags_returns_those_tags() {
+    let note_id = NoteId::from_folder_relative_path("notes/Inline.md").unwrap();
+    let note = MarkdownNote::parse(
+        note_id,
+        "---\ntitle: Inline Only\n---\n\nUses #celery and #datadog.\n",
+    );
+    let analysis = NoteAnalysis::from_note(&note);
+    let tags = merged_tags(&note, &analysis);
+    let names: Vec<&str> = tags.iter().map(Tag::name).collect();
+    assert_eq!(names, ["celery", "datadog"]);
 }
