@@ -126,6 +126,11 @@ struct FolderState {
     /// invalidated whenever the underlying note set changes (indexer events,
     /// `new_note`, image embed inserts).
     cached_tree: Option<tree::Tree>,
+    /// Transient set of directory paths auto-expanded so the selected note is
+    /// visible. Kept in memory only (never persisted) so reopening the folder
+    /// preserves the user's explicit expand/collapse choices, and dedup'd via
+    /// the set rather than appended every frame.
+    auto_expanded: std::collections::BTreeSet<String>,
 }
 
 impl FolderState {
@@ -151,6 +156,7 @@ impl FolderState {
             settings,
             indexes_ready: false,
             cached_tree: None,
+            auto_expanded: std::collections::BTreeSet::new(),
         })
     }
 
@@ -427,23 +433,17 @@ impl SideromelaneApp {
             return;
         };
 
-        // Auto-expand the path to the selected note on first render of this folder so
-        // the user lands on a tree where their current note is visible.
+        // Auto-expand ancestors of the selected note into a transient
+        // in-memory set so the user lands on a tree where their current note
+        // is visible, without mutating (and re-persisting) the explicit
+        // `tree_expanded_paths` every frame.
         if let Some(selected_note) = folder
             .selected
             .and_then(|index| folder.notes.get(index))
             .map(|record| record.note_id.clone())
         {
             for ancestor in tree::ancestor_paths(&selected_note) {
-                if !folder
-                    .settings
-                    .ui
-                    .tree_expanded_paths
-                    .iter()
-                    .any(|existing| existing == &ancestor)
-                {
-                    folder.settings.ui.tree_expanded_paths.push(ancestor);
-                }
+                folder.auto_expanded.insert(ancestor);
             }
         }
 
@@ -1000,13 +1000,14 @@ fn render_dir(
     depth: usize,
     tree_changed: &mut bool,
 ) {
-    let expanded_index = folder
+    let explicit_index = folder
         .settings
         .ui
         .tree_expanded_paths
         .iter()
         .position(|path| path == &dir.relative_path);
-    let mut expanded = expanded_index.is_some();
+    let auto_expanded = folder.auto_expanded.contains(&dir.relative_path);
+    let mut expanded = explicit_index.is_some() || auto_expanded;
 
     ui.horizontal(|ui| {
         #[allow(clippy::cast_precision_loss)]
@@ -1017,17 +1018,23 @@ fn render_dir(
             .clicked()
         {
             expanded = !expanded;
-            *tree_changed = true;
             if expanded {
-                if expanded_index.is_none() {
+                if explicit_index.is_none() {
                     folder
                         .settings
                         .ui
                         .tree_expanded_paths
                         .push(dir.relative_path.clone());
+                    *tree_changed = true;
                 }
-            } else if let Some(index) = expanded_index {
-                folder.settings.ui.tree_expanded_paths.remove(index);
+            } else {
+                if let Some(index) = explicit_index {
+                    folder.settings.ui.tree_expanded_paths.remove(index);
+                    *tree_changed = true;
+                }
+                // Drop the auto-expand entry too so the next frame doesn't
+                // immediately re-expand the directory the user just collapsed.
+                folder.auto_expanded.remove(&dir.relative_path);
             }
         }
     });
