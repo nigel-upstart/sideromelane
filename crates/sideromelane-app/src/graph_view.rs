@@ -18,6 +18,17 @@ use sideromelane_core::{FolderIndex, GraphNode, Neighborhood, NoteId};
 /// Default hop radius for the focus-scoped graph view.
 pub const DEFAULT_DEPTH: usize = 1;
 
+/// Hard cap on the `depth` argument accepted by [`draw`].
+///
+/// A depth beyond this would make neighborhood queries and graph layout
+/// prohibitively slow on large vaults, regardless of the UI slider range.
+const MAX_GRAPH_DEPTH: usize = 3;
+
+/// Pre-settle budget passed to `fast_forward_budgeted` on graph rebuild:
+/// iteration cap and wall-clock millisecond limit.
+const FAST_FORWARD_STEPS: u32 = 300;
+const FAST_FORWARD_MS: u64 = 50;
+
 /// Fill color used for tag nodes in the graph view (soft purple).
 const TAG_NODE_COLOR: Color32 = Color32::from_rgb(160, 100, 210);
 
@@ -96,7 +107,7 @@ pub fn draw(
         return None;
     };
 
-    let neighborhood = folder_index.neighborhood(focus, depth);
+    let neighborhood = folder_index.neighborhood(focus, depth.min(MAX_GRAPH_DEPTH));
     let signature = NeighborhoodSignature::new(focus, &neighborhood);
 
     let graph_changed = state.signature.as_ref() != Some(&signature);
@@ -110,7 +121,7 @@ pub fn draw(
 
     if graph_changed {
         reset::<FruchtermanReingoldState>(ui, None);
-        NoteGraphView::fast_forward_budgeted(ui, graph, 300, 50, None);
+        NoteGraphView::fast_forward_budgeted(ui, graph, FAST_FORWARD_STEPS, FAST_FORWARD_MS, None);
     }
 
     let mut widget = NoteGraphView::new(graph)
@@ -142,7 +153,10 @@ fn build_graph(focus: &GraphNode, neighborhood: &Neighborhood) -> NoteGraph {
         let location = if node == focus {
             Pos2::ZERO
         } else {
-            let i = non_focus.iter().position(|n| *n == node).unwrap_or(0);
+            let Some(i) = non_focus.iter().position(|n| *n == node) else {
+                debug_assert!(false, "non-focus node missing from non_focus list");
+                continue;
+            };
             // Node counts never exceed a few thousand; precision loss is negligible.
             #[allow(clippy::cast_precision_loss)]
             let angle = 2.0_f32 * std::f32::consts::PI * i as f32 / count as f32;
@@ -347,5 +361,83 @@ mod tests {
         };
         let graph = build_graph(&focus, &neighborhood);
         assert_eq!(graph.g().edge_count(), 1);
+    }
+
+    #[test]
+    fn build_graph_tag_node_receives_purple_color() {
+        let focus = note_node("notes/Focus.md");
+        let tag = tag_node("kubernetes");
+        let neighborhood = Neighborhood {
+            nodes: vec![focus.clone(), tag.clone()],
+            edges: vec![],
+        };
+        let graph = build_graph(&focus, &neighborhood);
+
+        let tag_color = graph
+            .nodes_iter()
+            .find(|(_, n)| n.payload() == &tag)
+            .map(|(_, n)| n.color());
+
+        assert_eq!(tag_color, Some(Some(TAG_NODE_COLOR)));
+
+        let note_color = graph
+            .nodes_iter()
+            .find(|(_, n)| n.payload() == &focus)
+            .map(|(_, n)| n.color());
+
+        assert_eq!(
+            note_color,
+            Some(None),
+            "note nodes must not have a custom color"
+        );
+    }
+
+    #[test]
+    fn neighborhood_signature_is_order_independent() {
+        let focus = note_node("notes/Focus.md");
+        let t1 = tag_node("alpha");
+        let t2 = tag_node("beta");
+
+        let sig_a = NeighborhoodSignature::new(
+            &focus,
+            &Neighborhood {
+                nodes: vec![focus.clone(), t1.clone(), t2.clone()],
+                edges: vec![(focus.clone(), t1.clone()), (focus.clone(), t2.clone())],
+            },
+        );
+        let sig_b = NeighborhoodSignature::new(
+            &focus,
+            &Neighborhood {
+                nodes: vec![t2.clone(), focus.clone(), t1.clone()],
+                edges: vec![(focus.clone(), t2), (focus.clone(), t1)],
+            },
+        );
+
+        assert_eq!(
+            sig_a, sig_b,
+            "signature must be equal regardless of node/edge insertion order"
+        );
+    }
+
+    #[test]
+    fn detect_clicked_node_does_not_refire_already_selected_node() {
+        let tag = Tag::new("kubernetes").unwrap();
+        let mut graph = NoteGraph::new(petgraph::stable_graph::StableGraph::default());
+        let idx = graph.add_node(GraphNode::Tag { tag: tag.clone() });
+        graph.set_selected_nodes(vec![idx]);
+
+        let mut last = vec![];
+        let first_call = detect_clicked_node(&graph, &mut last);
+        assert_eq!(
+            first_call,
+            Some(GraphNode::Tag { tag }),
+            "first call must return the new selection"
+        );
+
+        let second_call = detect_clicked_node(&graph, &mut last);
+        assert!(
+            second_call.is_none(),
+            "second call with same selection must not re-fire"
+        );
     }
 }
