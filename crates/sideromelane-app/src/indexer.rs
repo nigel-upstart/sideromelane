@@ -12,6 +12,7 @@
 //! against whatever indexes the app currently holds. They start empty, then
 //! become eventually consistent as `IndexUpdated` events arrive.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -189,10 +190,29 @@ fn worker_loop(
                     record.source = source;
                 } else if let Some((root, options)) = last_walk.as_ref() {
                     // Brand-new note that the indexer has not seen yet.
-                    // Re-discover so the fresh save shows up in subsequent indexes.
+                    // Re-discover so the fresh save shows up in subsequent indexes,
+                    // but merge against the existing in-memory set so unsaved
+                    // edits to other notes survive the rediscovery.
                     match discover_notes(root, options) {
-                        Ok(records) => {
-                            current_notes = records;
+                        Ok(fresh) => {
+                            let mut existing: HashMap<NoteId, NoteRecord> =
+                                std::mem::take(&mut current_notes)
+                                    .into_iter()
+                                    .map(|record| (record.note_id.clone(), record))
+                                    .collect();
+                            let mut merged: Vec<NoteRecord> = Vec::with_capacity(fresh.len());
+                            for fresh_record in fresh {
+                                if let Some(mut prior) = existing.remove(&fresh_record.note_id) {
+                                    // In-memory edits win for `source`, but pick up any
+                                    // path change (e.g. rename) from the fresh discovery.
+                                    prior.absolute_path = fresh_record.absolute_path;
+                                    merged.push(prior);
+                                } else {
+                                    merged.push(fresh_record);
+                                }
+                            }
+                            // Anything left in `existing` was not seen on disk and is dropped.
+                            current_notes = merged;
                             if let Some(record) = current_notes
                                 .iter_mut()
                                 .find(|record| record.note_id == note_id)
