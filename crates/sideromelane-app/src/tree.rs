@@ -213,6 +213,38 @@ mod tests {
     }
 
     #[test]
+    fn directory_with_subdirs_and_notes_keeps_both() {
+        let tree = build_tree(&[
+            note("Cloud/Plan.md"),
+            note("Cloud/Q4/Forecast.md"),
+            note("Cloud/Q4/Notes.md"),
+            note("Cloud/Charter.md"),
+        ]);
+        assert_eq!(tree.subdirs.len(), 1);
+        let cloud = &tree.subdirs[0];
+        assert_eq!(cloud.name, "Cloud");
+        // Two notes directly under Cloud, sorted by stem.
+        assert_eq!(cloud.notes.len(), 2);
+        assert_eq!(cloud.notes[0].file_stem(), "Charter");
+        assert_eq!(cloud.notes[1].file_stem(), "Plan");
+        // One subdir Q4 with two notes.
+        assert_eq!(cloud.subdirs.len(), 1);
+        let q4 = &cloud.subdirs[0];
+        assert_eq!(q4.name, "Q4");
+        assert_eq!(q4.relative_path, "Cloud/Q4");
+        assert_eq!(q4.notes.len(), 2);
+        assert_eq!(q4.notes[0].file_stem(), "Forecast");
+        assert_eq!(q4.notes[1].file_stem(), "Notes");
+    }
+
+    #[test]
+    fn multiple_top_level_subdirs_are_sorted() {
+        let tree = build_tree(&[note("Zeta/A.md"), note("Alpha/B.md"), note("Mid/C.md")]);
+        let names: Vec<&str> = tree.subdirs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "Mid", "Zeta"]);
+    }
+
+    #[test]
     fn ancestor_paths_returns_each_directory_step() {
         let ancestors = ancestor_paths(&note("a/b/c/Deep.md"));
         assert_eq!(ancestors, vec!["a", "a/b", "a/b/c"]);

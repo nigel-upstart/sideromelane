@@ -109,6 +109,34 @@ mod tests {
     }
 
     #[test]
+    fn handles_only_hashes_and_whitespace() {
+        assert_eq!(display_heading_text("###"), "");
+        assert_eq!(display_heading_text("##   "), "");
+    }
+
+    #[test]
+    fn handles_internal_emphasis_runs() {
+        // Surrounding markers stripped; internal emphasis kept as-is.
+        assert_eq!(
+            display_heading_text("## **First** and *second*"),
+            "First** and *second"
+        );
+    }
+
+    #[test]
+    fn handles_mismatched_markers() {
+        // Leading `***` stripped as `**` then `*`; trailing `*` then nothing.
+        assert_eq!(display_heading_text("# ***Bold-ish*"), "Bold-ish");
+    }
+
+    #[test]
+    fn passes_through_when_no_hash_prefix() {
+        // Outline never sees raw lines without `#`, but the helper should be
+        // robust if it ever does.
+        assert_eq!(display_heading_text("Plain"), "Plain");
+    }
+
+    #[test]
     fn font_sizes_decrease_monotonically() {
         let base = 14.0;
         let sizes: Vec<f32> = (1..=6)
