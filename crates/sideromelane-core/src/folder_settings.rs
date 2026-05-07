@@ -2,8 +2,8 @@
 //!
 //! Settings live in the folder so a folder remains self-describing if moved
 //! between machines. The schema is strict: any unknown or missing top-level
-//! field is a load error. Future additive changes will bump
-//! [`CURRENT_SETTINGS_VERSION`].
+//! field is a load error. Future additive changes will bump the internal
+//! version constant and add a migration path.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -71,8 +71,7 @@ const fn default_editor_word_wrap() -> bool {
 /// Walker ignore configuration controlled by the user from the folder UI.
 ///
 /// Additional glob support beyond `.sideromelaneignore` itself is intentionally not
-/// exposed in v1: users edit `.sideromelaneignore` directly. Unknown ignore-related
-/// fields written by future schema versions round-trip via [`FolderSettings::extra`].
+/// exposed in v1: users edit `.sideromelaneignore` directly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IgnoreSettings {
     /// Whether `.gitignore` files should also be honored when walking.
