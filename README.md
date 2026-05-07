@@ -1,9 +1,13 @@
 # Sideromelane
 
-Sideromelane is a new Rust toolchain project for a local-only native macOS desktop app.
+Sideromelane is a native macOS Markdown notes app written in Rust. It opens a local folder of
+`.md` files, indexes their content and links, and lets you read, edit, search, and explore the
+graph of connections — entirely offline. No cloud sync, no proprietary storage format, no plugin
+ecosystem; the folder stays usable in any other editor.
 
-The app spec is not written yet. Start with `SPEC.md`, then use `docs/skill-loading.md` to load the
-right agent-skills workflow for the phase of work.
+The product spec lives in `SPEC.md`; architectural decisions in `docs/adr/`; per-feature specs
+in `docs/specs/`. Use `docs/skill-loading.md` to pick up the right agent-skills workflow for
+the phase of work.
 
 ## Bootstrap
 
