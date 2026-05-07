@@ -60,6 +60,15 @@ behavior is identical to before.
   anchor through the outline-jump path landed in Slice 2.
 - Click handling depends on `egui_commonmark`'s `link_hooks` API; a hard fork would need
   another approach (e.g., intercepting `OutputCommand::OpenUrl`).
+- The CommonMark cache has no built-in size cap, so the app drops it wholesale on every
+  folder switch (so cached image fetches and link hooks from the previous folder do not
+  leak across) and again whenever an approximate byte budget
+  (`COMMONMARK_CACHE_BUDGET_BYTES`, currently 300 MiB) is crossed. The byte total is
+  estimated as the running sum of `MarkdownBlock::text.len()` rendered through live
+  preview since the last reset; the heuristic assumes `egui_commonmark`'s internal cost
+  scales roughly linearly with input bytes. Reset happens after the visible blocks were
+  drawn, so the user never sees a torn frame, and a status-bar message announces the
+  reset.
 
 ## Future Work
 
