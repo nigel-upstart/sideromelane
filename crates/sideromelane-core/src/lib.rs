@@ -17,7 +17,7 @@ pub use folder::{FolderPathError, NoteId};
 pub use folder_settings::{
     FOLDER_METADATA_DIR, FOLDER_SETTINGS_FILE, FolderSettings, FolderSettingsError, IgnoreSettings,
 };
-pub use index::{Backlink, FolderIndex, Graph, GraphEdge, GraphNode};
+pub use index::{Backlink, FolderIndex, Graph, GraphEdge, GraphNode, Neighborhood};
 pub use note::{Frontmatter, MarkdownNote, MetadataValue};
 pub use scan::{ScanError, WalkOptions, walk_markdown_paths};
 pub use search::{

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{MarkdownNote, NoteAnalysis, NoteId};
 
@@ -95,6 +95,76 @@ impl FolderIndex {
     pub const fn ambiguous_targets(&self) -> &BTreeMap<String, Vec<NoteId>> {
         &self.ambiguous_targets
     }
+
+    /// Returns the depth-bounded neighborhood of `focus`.
+    ///
+    /// BFS from `focus` over both forward links (edges where source == current)
+    /// and backlinks (edges where target == current), expanding up to `depth`
+    /// hops. The returned [`Neighborhood`] contains every node reachable within
+    /// `depth` hops together with all directed edges between any two nodes in
+    /// the result set — including self-loops on `focus`.
+    ///
+    /// `depth == 0` yields just the focus node and any self-loops on it. An
+    /// unknown `focus` (not present in this index) still returns a singleton
+    /// neighborhood containing only `focus` so callers can render an isolated
+    /// node without special-casing missing IDs.
+    #[must_use]
+    pub fn neighborhood(&self, focus: &NoteId, depth: usize) -> Neighborhood {
+        // BFS frontier expansion. We index edges by source/target on demand;
+        // graph sizes here are small and rebuilds happen on user navigation,
+        // not per frame, so the linear scan is fine.
+        let mut visited: BTreeSet<NoteId> = BTreeSet::new();
+        visited.insert(focus.clone());
+
+        let mut queue: VecDeque<(NoteId, usize)> = VecDeque::new();
+        queue.push_back((focus.clone(), 0));
+
+        while let Some((current, current_depth)) = queue.pop_front() {
+            if current_depth == depth {
+                continue;
+            }
+            for edge in &self.graph.edges {
+                let neighbor = if edge.source == current {
+                    Some(&edge.target)
+                } else if edge.target == current {
+                    Some(&edge.source)
+                } else {
+                    None
+                };
+                if let Some(neighbor) = neighbor
+                    && !visited.contains(neighbor)
+                {
+                    visited.insert(neighbor.clone());
+                    queue.push_back((neighbor.clone(), current_depth + 1));
+                }
+            }
+        }
+
+        let edges: Vec<(NoteId, NoteId)> = self
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| visited.contains(&edge.source) && visited.contains(&edge.target))
+            .map(|edge| (edge.source.clone(), edge.target.clone()))
+            .collect();
+
+        Neighborhood {
+            nodes: visited.into_iter().collect(),
+            edges,
+        }
+    }
+}
+
+/// Depth-bounded view of [`FolderIndex`] centered on a single note.
+///
+/// See [`FolderIndex::neighborhood`] for traversal semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Neighborhood {
+    /// Notes within the requested hop distance, deduplicated and sorted.
+    pub nodes: Vec<NoteId>,
+    /// Directed edges (`source` → `target`) between any two notes in
+    /// [`Neighborhood::nodes`], including self-loops.
+    pub edges: Vec<(NoteId, NoteId)>,
 }
 
 /// Directed graph of note links.
