@@ -1,10 +1,10 @@
 //! Per-folder settings persisted under `<folder-root>/.sideromelane/settings.json`.
 //!
 //! Settings live in the folder so a folder remains self-describing if moved
-//! between machines. The schema is versioned and unknown fields round-trip
-//! through [`FolderSettings::extra`] so older clients do not erase newer keys.
+//! between machines. The schema is strict: any unknown or missing top-level
+//! field is a load error. Future additive changes will bump
+//! [`CURRENT_SETTINGS_VERSION`].
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -23,18 +23,11 @@ const CURRENT_SETTINGS_VERSION: u32 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderSettings {
     /// Schema version for this settings document.
-    #[serde(default = "default_version")]
     pub version: u32,
     /// Walker ignore configuration.
-    #[serde(default)]
     pub ignore: IgnoreSettings,
     /// UI presentation preferences scoped to this folder.
-    #[serde(default)]
     pub ui: UiSettings,
-    /// Forward-compatibility bag: any unknown fields the loader did not
-    /// recognise are preserved here and round-tripped on save.
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for FolderSettings {
@@ -43,7 +36,6 @@ impl Default for FolderSettings {
             version: CURRENT_SETTINGS_VERSION,
             ignore: IgnoreSettings::default(),
             ui: UiSettings::default(),
-            extra: BTreeMap::new(),
         }
     }
 }
@@ -87,10 +79,6 @@ pub struct IgnoreSettings {
     /// Whether dotfiles and dotfolders are surfaced.
     #[serde(default)]
     pub include_dotfiles: bool,
-}
-
-const fn default_version() -> u32 {
-    CURRENT_SETTINGS_VERSION
 }
 
 /// Errors produced while loading or saving [`FolderSettings`].
@@ -221,7 +209,6 @@ mod tests {
         assert_eq!(settings.version, 1);
         assert!(!settings.ignore.honor_gitignore);
         assert!(!settings.ignore.include_dotfiles);
-        assert!(settings.extra.is_empty());
     }
 
     #[test]
@@ -238,41 +225,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_are_preserved() {
-        let dir = TempDir::new().expect("tempdir");
-        let metadata_dir = dir.path().join(FOLDER_METADATA_DIR);
-        std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
-        let raw = json!({
-            "version": 1,
-            "ignore": {
-                "honor_gitignore": true,
-                "include_dotfiles": false
-            },
-            "future_field": {"hello": "world"}
-        });
-        std::fs::write(
-            metadata_dir.join(FOLDER_SETTINGS_FILE),
-            serde_json::to_vec_pretty(&raw).expect("serialize"),
-        )
-        .expect("write");
-
-        let loaded = FolderSettings::load(dir.path()).expect("load");
-        assert!(loaded.extra.contains_key("future_field"));
-
-        loaded.save(dir.path()).expect("save preserves extra");
-        let bytes = std::fs::read(metadata_dir.join(FOLDER_SETTINGS_FILE)).expect("read");
-        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
-        assert_eq!(value.get("future_field"), Some(&json!({"hello": "world"})));
-    }
-
-    #[test]
     fn rejects_future_version() {
         let dir = TempDir::new().expect("tempdir");
         let metadata_dir = dir.path().join(FOLDER_METADATA_DIR);
         std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
         let raw = json!({
             "version": 999,
-            "ignore": {}
+            "ignore": {},
+            "ui": {}
         });
         std::fs::write(
             metadata_dir.join(FOLDER_SETTINGS_FILE),
@@ -314,30 +274,6 @@ mod tests {
             loaded.ui.tree_expanded_paths,
             vec!["Cloud".to_string(), "Cloud/Q4".to_string()]
         );
-    }
-
-    #[test]
-    fn legacy_settings_without_ui_key_load_with_defaults() {
-        // A v1 settings file written before `ui` existed must still load.
-        let dir = TempDir::new().expect("tempdir");
-        let metadata_dir = dir.path().join(FOLDER_METADATA_DIR);
-        std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
-        let raw = json!({
-            "version": 1,
-            "ignore": {
-                "honor_gitignore": false,
-                "include_dotfiles": false
-            }
-        });
-        std::fs::write(
-            metadata_dir.join(FOLDER_SETTINGS_FILE),
-            serde_json::to_vec_pretty(&raw).expect("serialize"),
-        )
-        .expect("write");
-
-        let loaded = FolderSettings::load(dir.path()).expect("load legacy");
-        assert!(loaded.ui.editor_word_wrap);
-        assert!(loaded.ui.tree_expanded_paths.is_empty());
     }
 
     #[test]
