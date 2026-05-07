@@ -181,6 +181,7 @@ pub fn live_preview_editor(
     pending_jump: &mut Option<usize>,
     folder_root: &Path,
     cache: &mut CommonMarkCache,
+    cache_bytes: &mut usize,
     block_preview_cache: &mut BlockPreviewCache,
     pending_link_click: &mut Option<String>,
 ) -> bool {
@@ -232,6 +233,11 @@ pub fn live_preview_editor(
                     // edit in the active block invalidates downstream entries
                     // whose ranges shift, and any in-place edit changes the
                     // hash.
+                    //
+                    // Track the rendered bytes against the soft CommonMark
+                    // budget so the caller can reset the cache once the
+                    // running total exceeds the cap.
+                    *cache_bytes = cache_bytes.saturating_add(block.text.len());
                     let hash = hash_block_text(&block.text);
                     let block_text = block.text.clone();
                     let block_root = folder_root.to_path_buf();

@@ -52,6 +52,15 @@ const MAX_INDEXER_EVENTS_PER_FRAME: usize = 16;
 /// drags, repeated folder opens) into a single atomic save without blocking
 /// the UI on every keystroke.
 const APP_STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
+/// Soft size budget for [`CommonMarkCache`]. The cache itself does not expose
+/// a usage metric, so we track an approximate byte total ourselves: the sum
+/// of `MarkdownBlock::text.len()` for every block fed through the live
+/// preview since the last reset. The heuristic is approximate; it assumes
+/// `egui_commonmark`'s internal cost (image bitmaps, syntax-highlight
+/// state, link hooks) scales roughly linearly with input bytes. Once the
+/// running total exceeds this budget, we drop the cache wholesale and start
+/// over so memory does not grow unbounded across long sessions.
+const COMMONMARK_CACHE_BUDGET_BYTES: usize = 300 * 1024 * 1024;
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -95,6 +104,10 @@ struct SideromelaneApp {
     /// Caches `egui_commonmark` rendering state (image fetches, syntax-highlighting state,
     /// and the link-hooks registry) across frames so per-block renders are stable.
     commonmark_cache: CommonMarkCache,
+    /// Approximate byte total fed into `commonmark_cache` since the last
+    /// reset. Reset to zero whenever the cache itself is replaced (folder
+    /// switch or budget overrun).
+    commonmark_cache_bytes: usize,
     /// Per-block memo for the live-preview pre-pass. Avoids re-running
     /// `transform_wiki_links` and the link-target scan on every frame for
     /// blocks whose `(range, hash)` key has not changed.
@@ -145,6 +158,7 @@ impl SideromelaneApp {
             preferences_window: PreferencesWindow::default(),
             startup_pending: true,
             commonmark_cache: CommonMarkCache::default(),
+            commonmark_cache_bytes: 0,
             block_preview_cache: BlockPreviewCache::new(),
             pending_link_click: None,
             app_menu: None,
@@ -394,6 +408,14 @@ impl SideromelaneApp {
                 self.status = format!("Opened {}", folder.root.display());
                 let scan_root = folder.root.clone();
                 self.app_state.record_folder_open(&scan_root);
+                // Drop the previous folder's CommonMark cache so cached
+                // image fetches, link hooks, and syntax-highlight state do
+                // not leak across folders. The per-block preview cache is
+                // also reset because its keys are byte ranges into the
+                // previous folder's notes.
+                self.commonmark_cache = CommonMarkCache::default();
+                self.commonmark_cache_bytes = 0;
+                self.block_preview_cache.clear();
                 // Drop the previous note's `last_note` so the post-`update`
                 // bookkeeping picks up whatever this folder selects on the
                 // next frame rather than carrying over a stale relative path.
@@ -1170,6 +1192,7 @@ impl SideromelaneApp {
                 &mut self.pending_jump,
                 &folder_root,
                 &mut self.commonmark_cache,
+                &mut self.commonmark_cache_bytes,
                 &mut self.block_preview_cache,
                 &mut self.pending_link_click,
             ),
@@ -1204,6 +1227,18 @@ impl SideromelaneApp {
         // Drain any pending in-app link click. Navigates to the target note if it exists.
         if let Some(target) = self.pending_link_click.take() {
             self.navigate_to_note_by_name(&target);
+        }
+
+        // Soft-reset the CommonMark cache once we cross the byte budget.
+        // We do this AFTER rendering so the visible blocks were drawn from
+        // the live cache; the next frame repopulates from cold but with
+        // bounded memory. The budget is approximate (see
+        // `COMMONMARK_CACHE_BUDGET_BYTES` doc).
+        if self.commonmark_cache_bytes > COMMONMARK_CACHE_BUDGET_BYTES {
+            self.commonmark_cache = CommonMarkCache::default();
+            self.block_preview_cache.clear();
+            self.commonmark_cache_bytes = 0;
+            "Preview cache reset (over 300 MiB)".clone_into(&mut self.status);
         }
     }
 
