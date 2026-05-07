@@ -9,7 +9,9 @@ mod preferences;
 mod preview;
 mod state;
 mod tree;
+mod watcher;
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io as std_io;
 use std::io::Read;
@@ -43,6 +45,10 @@ const MAX_INDEXER_EVENTS_PER_FRAME: usize = 16;
 /// drags, repeated folder opens) into a single atomic save without blocking
 /// the UI on every keystroke.
 const APP_STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
+/// Window after a successful self-initiated `safe_write` during which any
+/// watcher event for the same path is treated as our own write and ignored.
+/// See ADR 0013.
+const SELF_WRITE_SUPPRESS_WINDOW: Duration = Duration::from_millis(200);
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -93,6 +99,19 @@ struct SideromelaneApp {
     /// `muda` needs `NSApplication` to be running before
     /// `Menu::init_for_nsapp` can attach.
     app_menu: Option<AppMenu>,
+    /// Records the wall-clock instant of the last self-initiated `safe_write`
+    /// per absolute path. Watcher events arriving inside
+    /// [`SELF_WRITE_SUPPRESS_WINDOW`] of one of these timestamps are dropped
+    /// so auto-save's own writes do not trigger external-change conflict
+    /// detection. See ADR 0013.
+    last_self_write_at: HashMap<PathBuf, Instant>,
+    /// Filesystem watcher for the currently-open folder. Replaced on every
+    /// `open_folder` so the previous folder's notify thread is dropped.
+    watcher: Option<watcher::Watcher>,
+    /// Notes whose on-disk version diverged while the in-memory buffer was
+    /// dirty. Each entry drives a non-blocking conflict modal until the user
+    /// resolves it (Reload from disk / Keep mine).
+    pending_conflicts: Vec<NoteId>,
 }
 
 impl SideromelaneApp {
@@ -115,6 +134,9 @@ impl SideromelaneApp {
             commonmark_cache: CommonMarkCache::default(),
             pending_link_click: None,
             app_menu: None,
+            last_self_write_at: HashMap::new(),
+            watcher: None,
+            pending_conflicts: Vec::new(),
         }
     }
 }
@@ -136,7 +158,9 @@ impl eframe::App for SideromelaneApp {
         }
         self.drain_menu_events();
         self.drain_indexer_events();
+        self.drain_watcher_events();
         self.handle_dropped_files(ui.ctx());
+        self.auto_save_tick();
 
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
@@ -181,6 +205,8 @@ impl eframe::App for SideromelaneApp {
 
         egui::CentralPanel::default().show_inside(ui, |ui| self.main_panel(ui));
 
+        self.render_conflict_modals(ui.ctx());
+
         if self.preferences_open {
             let context = ui.ctx().clone();
             let changed = self.preferences_window.show(
@@ -216,6 +242,17 @@ enum EditorMode {
     Raw,
     LivePreview,
     Graph,
+}
+
+/// User choice when a watcher reports an external change to a dirty note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConflictChoice {
+    /// Replace the in-memory buffer with the on-disk version. Discards
+    /// unsaved edits.
+    Reload,
+    /// Keep the in-memory buffer. The next auto-save sweep overwrites the
+    /// disk version.
+    Keep,
 }
 
 #[derive(Debug)]
@@ -288,6 +325,9 @@ struct NoteRecord {
     absolute_path: PathBuf,
     source: String,
     dirty: bool,
+    /// Last time the user (or a programmatic edit) mutated `source`. Used by
+    /// the auto-save tick to skip notes the user is still actively editing.
+    last_edit_at: Instant,
 }
 
 impl NoteRecord {
@@ -305,6 +345,7 @@ impl NoteRecord {
             absolute_path,
             source,
             dirty: false,
+            last_edit_at: Instant::now(),
         })
     }
 }
@@ -334,6 +375,18 @@ impl SideromelaneApp {
                 if let Some(menu) = self.app_menu.as_mut() {
                     menu.rebuild_recent_submenu(&self.app_state.recent_folders);
                 }
+                // Replace the previous folder's watcher (if any). Watcher
+                // failures are surfaced in the status bar but never block
+                // the open — the app remains usable with auto-save only.
+                self.watcher = match watcher::Watcher::new(&scan_root) {
+                    Ok(watcher) => Some(watcher),
+                    Err(error) => {
+                        self.status = format!("File watch unavailable: {error}");
+                        None
+                    }
+                };
+                self.pending_conflicts.clear();
+                self.last_self_write_at.clear();
                 self.dispatch_rescan(scan_root);
             }
             Err(error) => self.status = format!("Open failed: {error}"),
@@ -419,6 +472,7 @@ impl SideromelaneApp {
             absolute_path,
             source,
             dirty: true,
+            last_edit_at: Instant::now(),
         });
         folder.selected = Some(folder.notes.len() - 1);
         folder.cached_tree = None;
@@ -443,8 +497,11 @@ impl SideromelaneApp {
                 note.dirty = false;
                 let note_id = note.note_id.clone();
                 let source = note.source.clone();
+                let absolute_path = note.absolute_path.clone();
                 let relative = note.note_id.relative_path().display().to_string();
                 self.status = format!("Saved {relative}");
+                self.last_self_write_at
+                    .insert(absolute_path, Instant::now());
                 if let Some(indexer) = self.indexer.as_ref() {
                     indexer.send(IndexerCommand::NoteChanged { note_id, source });
                 }
@@ -513,6 +570,39 @@ impl SideromelaneApp {
         self.preferences_open = true;
     }
 
+    /// Walk dirty notes and persist any whose last edit is older than the
+    /// configured auto-save debounce. Errors are surfaced in the status bar
+    /// without clearing `dirty`, so the next tick retries.
+    fn auto_save_tick(&mut self) {
+        let Some(folder) = self.folder.as_mut() else {
+            return;
+        };
+        let debounce =
+            Duration::from_secs(u64::from(self.app_state.auto_save_debounce_secs.max(1)));
+        let now = Instant::now();
+        let outcome = auto_save_dirty_notes(&mut folder.notes, debounce, now);
+        for AutoSaveOutcome {
+            note_id,
+            source,
+            absolute_path,
+            relative,
+        } in &outcome.saved
+        {
+            self.last_self_write_at
+                .insert(absolute_path.clone(), Instant::now());
+            self.status = format!("Auto-saved {relative}");
+            if let Some(indexer) = self.indexer.as_ref() {
+                indexer.send(IndexerCommand::NoteChanged {
+                    note_id: note_id.clone(),
+                    source: source.clone(),
+                });
+            }
+        }
+        if let Some((relative, error)) = outcome.first_error {
+            self.status = format!("Auto-save failed for {relative}: {error}");
+        }
+    }
+
     fn dispatch_rescan(&mut self, root: PathBuf) {
         let options = self
             .folder
@@ -533,6 +623,83 @@ impl SideromelaneApp {
                 break;
             };
             self.apply_indexer_event(event);
+        }
+    }
+
+    /// Pop every pending watcher event and dispatch each one.
+    ///
+    /// Events for paths the app is not tracking (e.g. `assets/`, hidden
+    /// files, freshly created notes the indexer hasn't surfaced yet) are
+    /// silently ignored — the indexer rescan triggered after a save handles
+    /// any structural divergence.
+    fn drain_watcher_events(&mut self) {
+        let Some(watcher) = self.watcher.as_ref() else {
+            return;
+        };
+        // Collect first so we can drop the immutable `watcher` borrow before
+        // mutating `self.folder` / `pending_conflicts`.
+        let events: Vec<watcher::WatchEvent> = std::iter::from_fn(|| watcher.poll()).collect();
+        for event in events {
+            self.apply_watch_event(&event);
+        }
+    }
+
+    fn apply_watch_event(&mut self, event: &watcher::WatchEvent) {
+        // Only modify-class events trigger reloads / conflict prompts. The
+        // `Other` variant is reserved for future categories the UI does not
+        // need to react to today.
+        if event.kind != watcher::WatchKind::Modify {
+            return;
+        }
+        // Suppress events caused by our own writes within the configured window.
+        if let Some(stamp) = self.last_self_write_at.get(&event.path)
+            && stamp.elapsed() < SELF_WRITE_SUPPRESS_WINDOW
+        {
+            return;
+        }
+
+        let Some(folder) = self.folder.as_mut() else {
+            return;
+        };
+
+        // Match the event path back to a known note. Notify can canonicalize
+        // through symlinks (e.g. `/private/tmp/...` on macOS), so fall back
+        // to a file-name comparison if a direct hit fails.
+        let target_index = folder
+            .notes
+            .iter()
+            .position(|note| note.absolute_path == event.path)
+            .or_else(|| {
+                event.path.file_name().and_then(|name| {
+                    folder
+                        .notes
+                        .iter()
+                        .position(|note| note.absolute_path.file_name() == Some(name))
+                })
+            });
+        let Some(index) = target_index else {
+            return;
+        };
+
+        let note = &mut folder.notes[index];
+        if note.dirty {
+            // Conflict: surface a non-blocking modal. Dedup so a burst of
+            // fs events for the same note collapses into one prompt.
+            if !self.pending_conflicts.contains(&note.note_id) {
+                self.pending_conflicts.push(note.note_id.clone());
+            }
+        } else {
+            // Silent reload: replace the buffer with whatever is on disk.
+            // Errors leave the buffer untouched and surface in the status bar.
+            match fs::read_to_string(&note.absolute_path) {
+                Ok(source) => {
+                    note.source = source;
+                    note.last_edit_at = Instant::now();
+                }
+                Err(error) => {
+                    self.status = format!("Reload failed: {error}");
+                }
+            }
         }
     }
 
@@ -663,6 +830,7 @@ impl SideromelaneApp {
                 note.source.push_str(&relative_target);
                 note.source.push_str("]]\n");
                 note.dirty = true;
+                note.last_edit_at = Instant::now();
                 self.status = format!("Inserted {relative_target}");
                 folder.cached_tree = None;
                 let scan_root = folder.root.clone();
@@ -976,14 +1144,113 @@ impl SideromelaneApp {
         };
 
         if changed {
-            folder.notes[index].dirty = true;
-            // Index refresh is deferred to save; typing must not block on
-            // re-indexing every keystroke.
+            let note = &mut folder.notes[index];
+            note.dirty = true;
+            // Stamp the edit so the auto-save tick waits for inactivity
+            // before persisting. Index refresh is deferred to save; typing
+            // must not block on re-indexing every keystroke.
+            note.last_edit_at = Instant::now();
         }
 
         // Drain any pending in-app link click. Navigates to the target note if it exists.
         if let Some(target) = self.pending_link_click.take() {
             self.navigate_to_note_by_name(&target);
+        }
+    }
+
+    /// Render one non-blocking conflict window per pending conflict.
+    ///
+    /// Each window offers two actions:
+    /// * **Reload from disk** — replaces the in-memory buffer with the
+    ///   on-disk version, clears `dirty`, and drops the pending entry.
+    /// * **Keep mine** — drops the pending entry without changing the
+    ///   buffer; the next auto-save sweep overwrites the disk version.
+    fn render_conflict_modals(&mut self, context: &egui::Context) {
+        if self.pending_conflicts.is_empty() {
+            return;
+        }
+        let Some(folder) = self.folder.as_mut() else {
+            // No folder, nothing to reconcile against. Drop conflicts so a
+            // pending list does not survive a folder switch.
+            self.pending_conflicts.clear();
+            return;
+        };
+
+        // Walk a snapshot so we can mutate `pending_conflicts` inside the loop.
+        let pending = self.pending_conflicts.clone();
+        let mut resolved: Vec<NoteId> = Vec::new();
+        let mut status_update: Option<String> = None;
+
+        for note_id in pending {
+            let Some(index) = folder.notes.iter().position(|note| note.note_id == note_id) else {
+                // Note no longer in the folder (renamed, deleted). Drop the entry.
+                resolved.push(note_id);
+                continue;
+            };
+            let title = format!("{} changed on disk", note_id.file_stem());
+            let window_id = egui::Id::new(("sm-conflict", note_id.relative_path()));
+            let mut keep_open = true;
+            let mut action: Option<ConflictChoice> = None;
+
+            egui::Window::new(title)
+                .id(window_id)
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut keep_open)
+                .show(context, |ui| {
+                    ui.label(
+                        "This file was modified outside Sideromelane while \
+                         your buffer has unsaved edits.",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Reload from disk").clicked() {
+                            action = Some(ConflictChoice::Reload);
+                        }
+                        if ui.button("Keep mine").clicked() {
+                            action = Some(ConflictChoice::Keep);
+                        }
+                    });
+                });
+
+            // Treat an OS-level close (X button) as "Keep mine"; the buffer
+            // already reflects the user's edits and the next auto-save will
+            // overwrite the disk version.
+            if !keep_open && action.is_none() {
+                action = Some(ConflictChoice::Keep);
+            }
+
+            match action {
+                Some(ConflictChoice::Reload) => {
+                    let note = &mut folder.notes[index];
+                    match fs::read_to_string(&note.absolute_path) {
+                        Ok(source) => {
+                            note.source = source;
+                            note.dirty = false;
+                            note.last_edit_at = Instant::now();
+                            status_update = Some(format!(
+                                "Reloaded {} from disk",
+                                note.note_id.relative_path().display()
+                            ));
+                            resolved.push(note_id);
+                        }
+                        Err(error) => {
+                            status_update = Some(format!("Reload failed: {error}"));
+                            // Leave the entry pending so the user can retry.
+                        }
+                    }
+                }
+                Some(ConflictChoice::Keep) => {
+                    resolved.push(note_id);
+                }
+                None => {}
+            }
+        }
+
+        if !resolved.is_empty() {
+            self.pending_conflicts.retain(|id| !resolved.contains(id));
+        }
+        if let Some(message) = status_update {
+            self.status = message;
         }
     }
 
@@ -1532,6 +1799,7 @@ fn merge_discovered_notes(folder: &mut FolderState, discovered: Vec<indexer::Not
                 absolute_path: record.absolute_path,
                 source: record.source,
                 dirty: false,
+                last_edit_at: Instant::now(),
             });
         }
     }
@@ -1546,6 +1814,69 @@ fn merge_discovered_notes(folder: &mut FolderState, discovered: Vec<indexer::Not
         folder.selected = Some(0);
     }
     folder.notes = merged;
+}
+
+/// One successfully auto-saved note. Owns clones of the fields the caller
+/// needs to drive status updates and the indexer rebuild after the borrow on
+/// `notes` is released.
+#[derive(Debug)]
+struct AutoSaveOutcome {
+    note_id: NoteId,
+    source: String,
+    absolute_path: PathBuf,
+    relative: String,
+}
+
+/// Aggregated result of one auto-save sweep. `first_error` carries the first
+/// `safe_write` failure encountered so the UI can surface it; subsequent
+/// errors are not collected because they would all share the same status
+/// slot anyway.
+#[derive(Debug, Default)]
+struct AutoSaveSweep {
+    saved: Vec<AutoSaveOutcome>,
+    first_error: Option<(String, std_io::Error)>,
+}
+
+/// Pure-ish auto-save iteration helper. Walks `notes`, calls `safe_write`
+/// on each one whose last edit is older than `debounce`, clears `dirty`
+/// on success, and returns the per-note outcomes for the caller to thread
+/// through the indexer and status bar without holding a `&mut FolderState`.
+///
+/// `now` is taken as a parameter so tests can simulate a debounce timeout
+/// without `std::thread::sleep`.
+fn auto_save_dirty_notes(
+    notes: &mut [NoteRecord],
+    debounce: Duration,
+    now: Instant,
+) -> AutoSaveSweep {
+    let mut sweep = AutoSaveSweep::default();
+    for note in notes.iter_mut() {
+        if !note.dirty {
+            continue;
+        }
+        if now.saturating_duration_since(note.last_edit_at) < debounce {
+            continue;
+        }
+        match safe_write(&note.absolute_path, &note.source) {
+            Ok(()) => {
+                note.dirty = false;
+                let relative = note.note_id.relative_path().display().to_string();
+                sweep.saved.push(AutoSaveOutcome {
+                    note_id: note.note_id.clone(),
+                    source: note.source.clone(),
+                    absolute_path: note.absolute_path.clone(),
+                    relative,
+                });
+            }
+            Err(error) => {
+                if sweep.first_error.is_none() {
+                    let relative = note.note_id.relative_path().display().to_string();
+                    sweep.first_error = Some((relative, error));
+                }
+            }
+        }
+    }
+    sweep
 }
 
 fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
@@ -1646,9 +1977,40 @@ fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[allow(
+    clippy::float_cmp,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
 mod tests {
-    use super::clamp_split_height;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use sideromelane_core::NoteId;
+    use tempfile::TempDir;
+
+    use super::{NoteRecord, auto_save_dirty_notes, clamp_split_height};
+
+    fn note_record(absolute_path: PathBuf, source: &str, last_edit_at: Instant) -> NoteRecord {
+        let parent = absolute_path
+            .parent()
+            .expect("absolute path has parent")
+            .to_path_buf();
+        let relative = absolute_path
+            .strip_prefix(&parent)
+            .expect("strip prefix")
+            .to_path_buf();
+        let note_id = NoteId::from_folder_relative_path(relative).expect("note id");
+        NoteRecord {
+            note_id,
+            absolute_path,
+            source: source.to_owned(),
+            dirty: true,
+            last_edit_at,
+        }
+    }
 
     #[test]
     fn clamp_split_height_midpoint() {
@@ -1657,13 +2019,70 @@ mod tests {
 
     #[test]
     fn clamp_split_height_high_ratio_clamped() {
-        // 0.99 * 200 = 198, but max = 200 - 80 - 4 = 116
         assert_eq!(clamp_split_height(0.99, 200.0), 116.0);
     }
 
     #[test]
     fn clamp_split_height_low_ratio_clamped() {
-        // 0.01 * 200 = 2, but min = 80
         assert_eq!(clamp_split_height(0.01, 200.0), 80.0);
+    }
+
+    #[test]
+    fn auto_save_tick_writes_dirty_after_debounce() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Note.md");
+        fs::write(&path, "stale\n").expect("seed file");
+
+        let now = Instant::now();
+        let last_edit_at = now
+            .checked_sub(Duration::from_secs(6))
+            .expect("instant has six-second history");
+        let mut notes = vec![note_record(path.clone(), "fresh body", last_edit_at)];
+
+        let sweep = auto_save_dirty_notes(&mut notes, Duration::from_secs(5), now);
+
+        assert_eq!(sweep.saved.len(), 1);
+        assert!(sweep.first_error.is_none());
+        assert!(!notes[0].dirty);
+        assert_eq!(fs::read_to_string(&path).expect("read note"), "fresh body");
+    }
+
+    #[test]
+    fn auto_save_tick_skips_recently_edited_notes() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Recent.md");
+        fs::write(&path, "previous\n").expect("seed file");
+
+        let now = Instant::now();
+        let last_edit_at = now
+            .checked_sub(Duration::from_secs(1))
+            .expect("instant has one-second history");
+        let mut notes = vec![note_record(path.clone(), "in progress", last_edit_at)];
+
+        let sweep = auto_save_dirty_notes(&mut notes, Duration::from_secs(5), now);
+
+        assert!(sweep.saved.is_empty());
+        assert!(notes[0].dirty);
+        assert_eq!(fs::read_to_string(&path).expect("read note"), "previous\n");
+    }
+
+    #[test]
+    fn auto_save_tick_ignores_clean_notes() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Clean.md");
+        fs::write(&path, "synced\n").expect("seed file");
+
+        let now = Instant::now();
+        let last_edit_at = now
+            .checked_sub(Duration::from_mins(1))
+            .expect("instant has one-minute history");
+        let mut record = note_record(path.clone(), "in memory", last_edit_at);
+        record.dirty = false;
+        let mut notes = vec![record];
+
+        let sweep = auto_save_dirty_notes(&mut notes, Duration::from_secs(5), now);
+
+        assert!(sweep.saved.is_empty());
+        assert_eq!(fs::read_to_string(&path).expect("read"), "synced\n");
     }
 }
