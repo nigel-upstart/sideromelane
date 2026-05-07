@@ -186,6 +186,5 @@ pub fn draw(
         state.zoom = 1.0;
     }
 
-    let _ = rect;
     clicked_note
 }
