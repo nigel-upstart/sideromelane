@@ -39,3 +39,18 @@ fn keyword_search_ranks_text_matches_and_applies_filters() {
     assert_eq!(file_results.len(), 1);
     assert_eq!(file_results[0].note_id(), &retro_id);
 }
+
+#[test]
+fn inline_tag_filter_matches_note_without_frontmatter_tag() {
+    let note_id = NoteId::from_folder_relative_path("notes/K8s.md").unwrap();
+    let note = MarkdownNote::parse(
+        note_id.clone(),
+        "---\ntitle: K8s Notes\n---\n\nSee #kubernetes for context.\n",
+    );
+
+    let index = SearchIndex::from_notes(vec![note]);
+
+    let results = index.search(&SearchQuery::empty().with_tag("kubernetes"));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].note_id(), &note_id);
+}

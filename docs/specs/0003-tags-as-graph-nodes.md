@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — pending user confirmation before implementation.
+Implemented (d6720fb, f6321ed).
 
 ## Objective
 

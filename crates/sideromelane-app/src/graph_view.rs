@@ -189,3 +189,38 @@ pub fn note_focus(note_id: &NoteId) -> GraphNode {
         note_id: note_id.clone(),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use sideromelane_core::Tag;
+
+    #[test]
+    fn node_label_prefixes_tag_with_hash() {
+        let tag = Tag::new("kubernetes").unwrap();
+        let label = node_label(&GraphNode::Tag { tag });
+        assert_eq!(label, "#kubernetes");
+    }
+
+    #[test]
+    fn detect_clicked_node_returns_tag_node() {
+        let tag = Tag::new("kubernetes").unwrap();
+        let mut graph = NoteGraph::new(petgraph::stable_graph::StableGraph::default());
+        let idx = graph.add_node(GraphNode::Tag { tag: tag.clone() });
+        graph.set_selected_nodes(vec![idx]);
+
+        let result = detect_clicked_node(&graph, &mut vec![]);
+        assert_eq!(result, Some(GraphNode::Tag { tag }));
+    }
+
+    #[test]
+    fn detect_clicked_node_returns_none_when_nothing_selected() {
+        let tag = Tag::new("foo").unwrap();
+        let mut graph = NoteGraph::new(petgraph::stable_graph::StableGraph::default());
+        graph.add_node(GraphNode::Tag { tag });
+
+        let result = detect_clicked_node(&graph, &mut vec![]);
+        assert!(result.is_none());
+    }
+}
