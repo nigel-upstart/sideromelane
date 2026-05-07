@@ -123,40 +123,46 @@ pub fn raw_editor(
     word_wrap: bool,
     pending_jump: &mut Option<usize>,
 ) -> bool {
+    let line_count = note.source.lines().count().max(1);
+    let mut changed = false;
+
     if word_wrap {
-        let response = ui.add(
-            egui::TextEdit::multiline(&mut note.source)
-                .code_editor()
-                .desired_width(ui.available_width())
-                .desired_rows(32)
-                .lock_focus(true),
-        );
-        if let Some(offset) = pending_jump.take() {
-            scroll_text_edit_to_offset(ui, &response, offset);
-        }
-        response.changed()
+        egui::ScrollArea::vertical()
+            .id_salt("raw_vscroll")
+            .show(ui, |ui| {
+                let response = ui.add(
+                    egui::TextEdit::multiline(&mut note.source)
+                        .code_editor()
+                        .desired_width(ui.available_width())
+                        .desired_rows(line_count)
+                        .lock_focus(true),
+                );
+                if let Some(offset) = pending_jump.take() {
+                    scroll_text_edit_to_offset(ui, &response, offset);
+                }
+                changed = response.changed();
+            });
     } else {
-        // Horizontal scroll: don't constrain text wrap, let the scroll area handle overflow.
-        let mut changed = false;
         let mut layouter = nowrap_layouter();
-        let mut jump_response: Option<egui::Response> = None;
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            let response = ui.add(
-                egui::TextEdit::multiline(&mut note.source)
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(32)
-                    .lock_focus(true)
-                    .layouter(&mut layouter),
-            );
-            changed = response.changed();
-            jump_response = Some(response);
-        });
-        if let (Some(offset), Some(response)) = (pending_jump.take(), jump_response) {
-            scroll_text_edit_to_offset(ui, &response, offset);
-        }
-        changed
+        egui::ScrollArea::both()
+            .id_salt("raw_both_scroll")
+            .show(ui, |ui| {
+                let response = ui.add(
+                    egui::TextEdit::multiline(&mut note.source)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(line_count)
+                        .lock_focus(true)
+                        .layouter(&mut layouter),
+                );
+                if let Some(offset) = pending_jump.take() {
+                    scroll_text_edit_to_offset(ui, &response, offset);
+                }
+                changed = response.changed();
+            });
     }
+
+    changed
 }
 
 /// Position the cursor at `offset` inside the `TextEdit` whose response was
@@ -215,9 +221,27 @@ pub fn live_preview_editor(
     let note_stem = note.note_id.file_stem().to_owned();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
+        // Page navigation when not editing a block.
+        if active_block_index.is_none() {
+            let page = ui.clip_rect().height();
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown)) {
+                ui.scroll_with_delta(egui::vec2(0.0, -page));
+            }
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp)) {
+                ui.scroll_with_delta(egui::vec2(0.0, page));
+            }
+        }
+
         for (index, block) in blocks.iter().enumerate() {
-            let group_response = ui.group(|ui| {
-                if *active_block_index == Some(index) {
+            let is_active = *active_block_index == Some(index);
+            let active_fill = ui.visuals().faint_bg_color;
+            let frame = if is_active {
+                egui::Frame::new().fill(active_fill)
+            } else {
+                egui::Frame::NONE
+            };
+            let group_response = frame.show(ui, |ui| {
+                if is_active {
                     let mut text = block.text.clone();
                     let mut layouter = nowrap_layouter();
                     let widget = egui::TextEdit::multiline(&mut text)

@@ -1420,12 +1420,17 @@ fn render_note_row(
     ui.horizontal(|ui| {
         #[allow(clippy::cast_precision_loss)]
         ui.add_space(depth as f32 * TREE_INDENT_PER_LEVEL);
-        if ui
-            .selectable_label(*selected_note == Some(index), label)
-            .clicked()
-        {
+        let response = ui.selectable_label(*selected_note == Some(index), label);
+        if response.clicked() {
             *selected_note = Some(index);
         }
+        response.context_menu(|ui| {
+            if ui.button("Copy path").clicked() {
+                let abs = folder.root.join(note_id.relative_path());
+                ui.ctx().copy_text(abs.to_string_lossy().into_owned());
+                ui.close();
+            }
+        });
     });
 }
 
