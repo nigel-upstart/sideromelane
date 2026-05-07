@@ -671,4 +671,20 @@ mod tests {
         let tags = extract_inline_tags(body);
         assert_eq!(tags, vec![tag("real-tag")]);
     }
+
+    #[test]
+    fn mismatched_backtick_run_is_not_a_code_span() {
+        // Opener tick_len=1, no valid closer (mid-run has len=2): not a code span.
+        // Text is all literal; #real (preceded by space) must be extracted.
+        let tags = extract_inline_tags("`foo `` #real");
+        assert_eq!(tags, vec![tag("real")]);
+    }
+
+    #[test]
+    fn longer_inner_run_does_not_close_code_span() {
+        // "`foo```bar`" — opener 1, inner run 3 (not a closer), final 1 (valid closer).
+        // The whole span is code; #tag inside should be skipped.
+        let tags = extract_inline_tags("`foo```#skipped` #real");
+        assert_eq!(tags, vec![tag("real")]);
+    }
 }

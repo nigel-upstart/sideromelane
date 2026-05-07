@@ -111,7 +111,10 @@ impl SearchIndex {
     pub fn from_notes(notes: impl IntoIterator<Item = MarkdownNote>) -> Self {
         let mut documents = notes
             .into_iter()
-            .map(|note| SearchDocument::from_note(&note))
+            .map(|note| {
+                let analysis = NoteAnalysis::from_note(&note);
+                SearchDocument::from_note(&note, &analysis)
+            })
             .collect::<Vec<_>>();
 
         documents.sort_by(|left, right| left.note_id.cmp(&right.note_id));
@@ -224,7 +227,8 @@ struct SemanticDocument {
 
 impl SemanticDocument {
     fn from_note(note: &MarkdownNote) -> Self {
-        let search_document = SearchDocument::from_note(note);
+        let analysis = NoteAnalysis::from_note(note);
+        let search_document = SearchDocument::from_note(note, &analysis);
         let embedding = embed_text(&search_document.embedding_text());
 
         Self {
@@ -348,15 +352,14 @@ struct SearchDocument {
 }
 
 impl SearchDocument {
-    fn from_note(note: &MarkdownNote) -> Self {
+    fn from_note(note: &MarkdownNote, analysis: &NoteAnalysis) -> Self {
         let note_id = note.note_id().clone();
         let file_name = note.relative_search_path();
         let title = note
             .frontmatter()
             .and_then(|frontmatter| frontmatter.scalar("title"))
             .map(str::to_owned);
-        let analysis = NoteAnalysis::from_note(note);
-        let tags = merged_tags(note, &analysis)
+        let tags = merged_tags(note, analysis)
             .into_iter()
             .map(|tag| tag.name().to_owned())
             .collect();

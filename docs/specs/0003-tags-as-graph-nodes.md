@@ -91,6 +91,8 @@ in Spec 0002 (where `#kubernetes` was a graph hub).
   - Click selects the tag — switches `graph_view::current_focus` to the tag node and
     rebuilds the neighborhood. This shows every note using that tag plus, at depth ≥ 2,
     sibling tags they share.
+  - **Blocked (radius):** `egui_graphs` 0.30.0 exposes no node-size setter; smaller
+    tag-node radius deferred until the dep adds that API.
 
 ### AC-7: Search treats inline tags as tags
 - `app::indexer` and `core::search` already filter on `with_tag(...)`. Wire `merged_tags`

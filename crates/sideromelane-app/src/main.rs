@@ -615,10 +615,13 @@ impl SideromelaneApp {
 
     /// Toggle Graph mode. When already in Graph, drop back to Raw so the
     /// shortcut acts as a true toggle rather than locking the user in.
+    /// Clears `graph_focus` on entry so the graph always opens on the current
+    /// note rather than a stale tag focus from a prior session.
     fn toggle_graph_mode(&mut self) {
         self.mode = if self.mode == EditorMode::Graph {
             EditorMode::Raw
         } else {
+            self.graph_focus = None;
             EditorMode::Graph
         };
     }
