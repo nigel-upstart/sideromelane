@@ -167,9 +167,9 @@ impl eframe::App for SideromelaneApp {
         }
         if self.startup_pending {
             self.startup_pending = false;
-            self.run_startup();
+            self.run_startup(ui.ctx());
         }
-        self.drain_menu_events();
+        self.drain_menu_events(ui.ctx());
         self.drain_indexer_events();
         self.drain_watcher_events();
         self.handle_dropped_files(ui.ctx());
@@ -178,7 +178,7 @@ impl eframe::App for SideromelaneApp {
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open Folder").clicked() {
-                    self.pick_folder();
+                    self.pick_folder(ui.ctx());
                 }
                 let can_use_folder = self.folder.is_some();
                 if ui
@@ -378,15 +378,15 @@ impl NoteRecord {
 }
 
 impl SideromelaneApp {
-    fn pick_folder(&mut self) {
+    fn pick_folder(&mut self, ctx: &egui::Context) {
         let Some(root) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
 
-        self.open_folder(root);
+        self.open_folder(root, ctx);
     }
 
-    fn open_folder(&mut self, root: PathBuf) {
+    fn open_folder(&mut self, root: PathBuf, ctx: &egui::Context) {
         match FolderState::load(root) {
             Ok(folder) => {
                 self.status = format!("Opened {}", folder.root.display());
@@ -405,7 +405,7 @@ impl SideromelaneApp {
                 // Replace the previous folder's watcher (if any). Watcher
                 // failures are surfaced in the status bar but never block
                 // the open — the app remains usable with auto-save only.
-                self.watcher = match watcher::Watcher::new(&scan_root) {
+                self.watcher = match watcher::Watcher::new(&scan_root, ctx.clone()) {
                     Ok(watcher) => Some(watcher),
                     Err(error) => {
                         self.status = format!("File watch unavailable: {error}");
@@ -423,14 +423,14 @@ impl SideromelaneApp {
     /// Boot-time hand-off driven by `app_state.startup_mode`. Called once
     /// from `update` on the first frame so the eframe context is live in
     /// case any startup branch wants to surface a dialog.
-    fn run_startup(&mut self) {
+    fn run_startup(&mut self, ctx: &egui::Context) {
         match self.app_state.startup_mode {
             StartupMode::ReloadLast => {
                 if let Some(folder) = self.app_state.last_folder.clone()
                     && folder.is_dir()
                 {
                     let target_note = self.app_state.last_note.clone();
-                    self.open_folder(folder);
+                    self.open_folder(folder, ctx);
                     if let Some(relative) = target_note
                         && let Some(state) = self.folder.as_mut()
                         && let Some(index) = state.notes.iter().position(|note| {
@@ -442,17 +442,17 @@ impl SideromelaneApp {
                     }
                     return;
                 }
-                self.boot_default_folder();
+                self.boot_default_folder(ctx);
             }
             StartupMode::NewNote => {
-                self.boot_default_folder();
+                self.boot_default_folder(ctx);
                 self.new_note();
             }
         }
     }
 
     /// Open (creating if needed) the configured default folder.
-    fn boot_default_folder(&mut self) {
+    fn boot_default_folder(&mut self, ctx: &egui::Context) {
         let default_folder = self.app_state.default_folder.clone();
         if let Err(error) = validate_default_folder(&default_folder) {
             self.status = format!(
@@ -468,7 +468,7 @@ impl SideromelaneApp {
             );
             return;
         }
-        self.open_folder(default_folder);
+        self.open_folder(default_folder, ctx);
     }
 
     /// Persist `app_state` if it has been marked dirty and the debounce
@@ -499,7 +499,12 @@ impl SideromelaneApp {
         let Some(folder) = self.folder.as_mut() else {
             return;
         };
-        let (note_id, absolute_path) = next_untitled_note(&folder.root);
+        let Some((note_id, absolute_path)) = next_untitled_note(&folder.root) else {
+            self.status = format!(
+                "Couldn't find an unused Untitled.md name (tried {NEXT_UNTITLED_NOTE_MAX_ATTEMPTS})"
+            );
+            return;
+        };
         let source = format!("# {}\n", note_id.file_stem());
         let new_index = folder.notes.len();
         folder
@@ -539,7 +544,7 @@ impl SideromelaneApp {
                 let relative = note.note_id.relative_path().display().to_string();
                 self.status = format!("Saved {relative}");
                 self.last_self_write_at
-                    .insert(absolute_path, Instant::now());
+                    .insert(canonicalize_path(&absolute_path), Instant::now());
                 if let Some(indexer) = self.indexer.as_ref() {
                     indexer.send(IndexerCommand::NoteChanged { note_id, source });
                 }
@@ -551,25 +556,25 @@ impl SideromelaneApp {
     /// Drain pending menu events and dispatch each one. Bounded per frame
     /// for the same reason `drain_indexer_events` is bounded — a hostile or
     /// pathological burst must not starve UI input handling.
-    fn drain_menu_events(&mut self) {
+    fn drain_menu_events(&mut self, ctx: &egui::Context) {
         for _ in 0..MAX_INDEXER_EVENTS_PER_FRAME {
             let Some(action) = self.app_menu.as_ref().and_then(AppMenu::poll) else {
                 break;
             };
-            self.dispatch_menu_action(action);
+            self.dispatch_menu_action(action, ctx);
         }
     }
 
-    fn dispatch_menu_action(&mut self, action: MenuAction) {
+    fn dispatch_menu_action(&mut self, action: MenuAction, ctx: &egui::Context) {
         match action {
-            MenuAction::OpenFolder => self.pick_folder(),
+            MenuAction::OpenFolder => self.pick_folder(ctx),
             MenuAction::NewNote => self.new_note(),
             MenuAction::Save => self.save_selected(),
             MenuAction::Close => self.close_active_note(),
             MenuAction::ToggleGraph => self.toggle_graph_mode(),
             MenuAction::ToggleWordWrap => self.toggle_word_wrap(),
             MenuAction::ShowPreferences => self.show_preferences(),
-            MenuAction::OpenRecent(path) => self.open_folder(path),
+            MenuAction::OpenRecent(path) => self.open_folder(path, ctx),
         }
     }
 
@@ -627,7 +632,7 @@ impl SideromelaneApp {
         } in &outcome.saved
         {
             self.last_self_write_at
-                .insert(absolute_path.clone(), Instant::now());
+                .insert(canonicalize_path(absolute_path), Instant::now());
             self.status = format!("Auto-saved {relative}");
             if let Some(indexer) = self.indexer.as_ref() {
                 indexer.send(IndexerCommand::NoteChanged {
@@ -639,6 +644,14 @@ impl SideromelaneApp {
         if let Some((relative, error)) = outcome.first_error {
             self.status = format!("Auto-save failed for {relative}: {error}");
         }
+
+        // Prune stale entries so the suppression map can't grow unbounded
+        // over a long session. The 4x factor leaves a comfortable margin
+        // past the suppression window (any entry older than that is no
+        // longer doing real work) while bounding memory by roughly the
+        // save rate over a 4 * SELF_WRITE_SUPPRESS_WINDOW (~800 ms) span.
+        self.last_self_write_at
+            .retain(|_, stamp| stamp.elapsed() < SELF_WRITE_SUPPRESS_WINDOW * 4);
     }
 
     fn dispatch_rescan(&mut self, root: PathBuf) {
@@ -719,9 +732,14 @@ impl SideromelaneApp {
                 let path = folder.notes[index].absolute_path.clone();
                 match fs::read_to_string(&path) {
                     Ok(source) => {
-                        let note = &mut folder.notes[index];
-                        note.source = source;
-                        note.last_edit_at = now;
+                        apply_reload(&mut folder.notes, index, source);
+                        // If the reloaded note is currently selected and we
+                        // are mid Live-Preview, the cached active block index
+                        // may now point past the new block list — drop it so
+                        // the renderer re-derives it from the fresh source.
+                        if folder.selected.is_some_and(|i| i == index) {
+                            self.active_block_index = None;
+                        }
                     }
                     Err(error) => {
                         self.status = format!("Reload failed: {error}");
@@ -1889,6 +1907,28 @@ enum WatchOutcome {
     },
 }
 
+/// Resolve `path` to its canonical form, falling back to the original on
+/// failure. Used by the self-write suppression map so its keys line up with
+/// the canonical paths the file watcher delivers (e.g. macOS resolves
+/// `/var/folders/...` to `/private/var/folders/...`). When canonicalisation
+/// fails (file just deleted, permission denied, …) we keep the original
+/// path: a non-canonical match is still valid for paths under non-symlinked
+/// roots and is strictly safer than dropping the entry.
+pub(crate) fn canonicalize_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Apply a watcher-driven reload to `notes[index]`. The fresh `source` came
+/// straight from disk, so the in-memory copy is now clean again and any
+/// subsequent auto-save debounce should be governed by the user's *own* next
+/// edit — not by the moment we observed the external write. We therefore
+/// clear `dirty` and deliberately leave `last_edit_at` untouched.
+fn apply_reload(notes: &mut [NoteRecord], index: usize, source: String) {
+    let note = &mut notes[index];
+    note.source = source;
+    note.dirty = false;
+}
+
 /// Pure dispatch helper for [`SideromelaneApp::apply_watch_event`]. Splits the
 /// suppress / reload / conflict decision from the mutation so it can be unit-
 /// tested without constructing a full [`SideromelaneApp`].
@@ -1910,17 +1950,13 @@ fn classify_watch_event(
     {
         return WatchOutcome::Suppressed;
     }
-    // Fast path: O(1) lookup against the precomputed index. The file-name
-    // fallback below is retained as a defensive net for symlinked paths /
-    // case-mismatched parents reported by some platform watchers; W1 will
-    // remove it in a follow-up commit.
-    let target_index = note_path_index.get(&event.path).copied().or_else(|| {
-        event.path.file_name().and_then(|name| {
-            notes
-                .iter()
-                .position(|note| note.absolute_path.file_name() == Some(name))
-        })
-    });
+    // O(1) lookup against the precomputed index. The file-name fallback we
+    // used to have was a path-spoof vector (a hostile sibling
+    // `attacker/Note.md` could impersonate `notes/Note.md`), so we match
+    // strictly by absolute path now. macOS canonicalization (`/private/...`)
+    // is reconciled by canonicalising both the watcher event path and the
+    // self-write suppression keys (`canonicalize_path`).
+    let target_index = note_path_index.get(&event.path).copied();
     match target_index {
         None => WatchOutcome::UnknownPath,
         Some(index) if notes[index].dirty => WatchOutcome::Conflict(notes[index].note_id.clone()),
@@ -1990,8 +2026,14 @@ fn auto_save_dirty_notes(
     sweep
 }
 
-fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
-    for index in 0.. {
+/// Maximum number of `Untitled N.md` collisions we will probe before giving
+/// up. A folder with this many existing untitled notes is so far past
+/// reasonable that it almost certainly indicates a buggy caller or a
+/// hostile filesystem rather than legitimate use.
+const NEXT_UNTITLED_NOTE_MAX_ATTEMPTS: u32 = 10_000;
+
+fn next_untitled_note(root: &Path) -> Option<(NoteId, PathBuf)> {
+    for index in 0..NEXT_UNTITLED_NOTE_MAX_ATTEMPTS {
         let file_name = if index == 0 {
             String::from("Untitled.md")
         } else {
@@ -2002,11 +2044,11 @@ fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
         if !absolute_path.exists()
             && let Ok(note_id) = NoteId::from_folder_relative_path(PathBuf::from(file_name))
         {
-            return (note_id, absolute_path);
+            return Some((note_id, absolute_path));
         }
     }
 
-    unreachable!("unbounded loop returns before exhausting usize");
+    None
 }
 
 fn is_image_path(path: &Path) -> bool {
@@ -2373,5 +2415,28 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn apply_reload_clears_dirty_and_preserves_last_edit_at() {
+        use super::apply_reload;
+
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Reload.md");
+        fs::write(&path, "stale\n").expect("seed");
+
+        let last_edit_at = Instant::now();
+        let mut record = note_record(path, "stale\n", last_edit_at);
+        record.dirty = true;
+        let mut notes = vec![record];
+
+        apply_reload(&mut notes, 0, "fresh\n".to_owned());
+
+        assert_eq!(notes[0].source, "fresh\n");
+        assert!(!notes[0].dirty, "dirty should be cleared after reload");
+        assert_eq!(
+            notes[0].last_edit_at, last_edit_at,
+            "last_edit_at must not be bumped by an external reload"
+        );
     }
 }
