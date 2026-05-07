@@ -108,3 +108,62 @@ fn duplicate_stems_produce_non_empty_ambiguous_targets() {
         "two notes share the 'Roadmap' stem"
     );
 }
+
+#[test]
+fn neighborhood_one_hop_collects_direct_neighbors() {
+    let a_id = NoteId::from_folder_relative_path("A.md").unwrap();
+    let b_id = NoteId::from_folder_relative_path("B.md").unwrap();
+    let c_id = NoteId::from_folder_relative_path("C.md").unwrap();
+
+    let a = MarkdownNote::parse(a_id.clone(), "# A\n[[B]] [[C]]\n");
+    let b = MarkdownNote::parse(b_id, "# B\n");
+    let c = MarkdownNote::parse(c_id, "# C\n");
+
+    let index = FolderIndex::from_notes(vec![a, b, c]);
+    let neighborhood = index.neighborhood(&a_id, 1);
+
+    let mut node_stems: Vec<&str> = neighborhood.nodes.iter().map(NoteId::file_stem).collect();
+    node_stems.sort_unstable();
+    assert_eq!(node_stems, vec!["A", "B", "C"]);
+    assert_eq!(neighborhood.edges.len(), 2);
+}
+
+#[test]
+fn neighborhood_depth_bounds_traversal() {
+    let a_id = NoteId::from_folder_relative_path("A.md").unwrap();
+    let b_id = NoteId::from_folder_relative_path("B.md").unwrap();
+    let c_id = NoteId::from_folder_relative_path("C.md").unwrap();
+
+    let a = MarkdownNote::parse(a_id.clone(), "# A\n[[B]]\n");
+    let b = MarkdownNote::parse(b_id, "# B\n[[C]]\n");
+    let c = MarkdownNote::parse(c_id, "# C\n");
+
+    let index = FolderIndex::from_notes(vec![a, b, c]);
+
+    let depth_one = index.neighborhood(&a_id, 1);
+    let mut one_stems: Vec<&str> = depth_one.nodes.iter().map(NoteId::file_stem).collect();
+    one_stems.sort_unstable();
+    assert_eq!(one_stems, vec!["A", "B"]);
+
+    let depth_two = index.neighborhood(&a_id, 2);
+    let mut two_stems: Vec<&str> = depth_two.nodes.iter().map(NoteId::file_stem).collect();
+    two_stems.sort_unstable();
+    assert_eq!(two_stems, vec!["A", "B", "C"]);
+}
+
+#[test]
+fn neighborhood_unknown_focus_returns_singleton() {
+    let known_id = NoteId::from_folder_relative_path("Known.md").unwrap();
+    let known = MarkdownNote::parse(known_id.clone(), "# Known\n");
+    let index = FolderIndex::from_notes(vec![known]);
+
+    let stranger_id = NoteId::from_folder_relative_path("Stranger.md").unwrap();
+    let neighborhood = index.neighborhood(&stranger_id, 3);
+
+    assert_eq!(neighborhood.nodes, vec![stranger_id]);
+    assert!(neighborhood.edges.is_empty());
+
+    let zero_depth = index.neighborhood(&known_id, 0);
+    assert_eq!(zero_depth.nodes, vec![known_id]);
+    assert!(zero_depth.edges.is_empty());
+}

@@ -1,6 +1,5 @@
 #![allow(missing_docs, clippy::too_many_lines)]
 
-mod graph_layout;
 mod graph_view;
 mod indexer;
 mod io;
@@ -144,6 +143,7 @@ impl eframe::App for SideromelaneApp {
                 ui.separator();
                 ui.selectable_value(&mut self.mode, EditorMode::Raw, "Raw");
                 ui.selectable_value(&mut self.mode, EditorMode::LivePreview, "Live Preview");
+                ui.selectable_value(&mut self.mode, EditorMode::Graph, "Graph");
                 ui.separator();
                 if ui.button("Preferences\u{2026}").clicked() {
                     self.preferences_open = !self.preferences_open;
@@ -199,6 +199,7 @@ enum EditorMode {
     #[default]
     Raw,
     LivePreview,
+    Graph,
 }
 
 #[derive(Debug)]
@@ -796,20 +797,6 @@ impl SideromelaneApp {
             }
         }
 
-        ui.separator();
-        ui.heading("Graph");
-        let selected_note = folder.selected_note().map(|note| note.note_id.clone());
-        let clicked = graph_view::draw(
-            ui,
-            &mut self.graph_view,
-            &folder.folder_index,
-            selected_note.as_ref(),
-        );
-        if let Some(note_id) = clicked {
-            select_note(folder, &note_id);
-            self.active_block_index = None;
-        }
-
         // Folder borrow ends with this scope; perform any deferred rescan
         // dispatch now that we can take a fresh `&mut self` borrow.
         let _ = folder;
@@ -862,6 +849,23 @@ impl SideromelaneApp {
                 &mut self.commonmark_cache,
                 &mut self.pending_link_click,
             ),
+            EditorMode::Graph => {
+                let focus = folder.notes[index].note_id.clone();
+                let clicked = graph_view::draw(
+                    ui,
+                    &mut self.graph_view,
+                    &folder.folder_index,
+                    Some(&focus),
+                    graph_view::DEFAULT_DEPTH,
+                );
+                if let Some(note_id) = clicked
+                    && note_id != focus
+                {
+                    select_note(folder, &note_id);
+                    self.active_block_index = None;
+                }
+                false
+            }
         };
 
         if changed {
