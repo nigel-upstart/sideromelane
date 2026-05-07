@@ -154,9 +154,9 @@ impl eframe::App for SideromelaneApp {
         }
         if self.startup_pending {
             self.startup_pending = false;
-            self.run_startup();
+            self.run_startup(ui.ctx());
         }
-        self.drain_menu_events();
+        self.drain_menu_events(ui.ctx());
         self.drain_indexer_events();
         self.drain_watcher_events();
         self.handle_dropped_files(ui.ctx());
@@ -165,7 +165,7 @@ impl eframe::App for SideromelaneApp {
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open Folder").clicked() {
-                    self.pick_folder();
+                    self.pick_folder(ui.ctx());
                 }
                 let can_use_folder = self.folder.is_some();
                 if ui
@@ -351,15 +351,15 @@ impl NoteRecord {
 }
 
 impl SideromelaneApp {
-    fn pick_folder(&mut self) {
+    fn pick_folder(&mut self, ctx: &egui::Context) {
         let Some(root) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
 
-        self.open_folder(root);
+        self.open_folder(root, ctx);
     }
 
-    fn open_folder(&mut self, root: PathBuf) {
+    fn open_folder(&mut self, root: PathBuf, ctx: &egui::Context) {
         match FolderState::load(root) {
             Ok(folder) => {
                 self.status = format!("Opened {}", folder.root.display());
@@ -378,7 +378,7 @@ impl SideromelaneApp {
                 // Replace the previous folder's watcher (if any). Watcher
                 // failures are surfaced in the status bar but never block
                 // the open — the app remains usable with auto-save only.
-                self.watcher = match watcher::Watcher::new(&scan_root) {
+                self.watcher = match watcher::Watcher::new(&scan_root, ctx.clone()) {
                     Ok(watcher) => Some(watcher),
                     Err(error) => {
                         self.status = format!("File watch unavailable: {error}");
@@ -396,14 +396,14 @@ impl SideromelaneApp {
     /// Boot-time hand-off driven by `app_state.startup_mode`. Called once
     /// from `update` on the first frame so the eframe context is live in
     /// case any startup branch wants to surface a dialog.
-    fn run_startup(&mut self) {
+    fn run_startup(&mut self, ctx: &egui::Context) {
         match self.app_state.startup_mode {
             StartupMode::ReloadLast => {
                 if let Some(folder) = self.app_state.last_folder.clone()
                     && folder.is_dir()
                 {
                     let target_note = self.app_state.last_note.clone();
-                    self.open_folder(folder);
+                    self.open_folder(folder, ctx);
                     if let Some(relative) = target_note
                         && let Some(state) = self.folder.as_mut()
                         && let Some(index) = state.notes.iter().position(|note| {
@@ -415,17 +415,17 @@ impl SideromelaneApp {
                     }
                     return;
                 }
-                self.boot_default_folder();
+                self.boot_default_folder(ctx);
             }
             StartupMode::NewNote => {
-                self.boot_default_folder();
+                self.boot_default_folder(ctx);
                 self.new_note();
             }
         }
     }
 
     /// Open (creating if needed) the configured default folder.
-    fn boot_default_folder(&mut self) {
+    fn boot_default_folder(&mut self, ctx: &egui::Context) {
         let default_folder = self.app_state.default_folder.clone();
         if let Err(error) = fs::create_dir_all(&default_folder) {
             self.status = format!(
@@ -434,7 +434,7 @@ impl SideromelaneApp {
             );
             return;
         }
-        self.open_folder(default_folder);
+        self.open_folder(default_folder, ctx);
     }
 
     /// Persist `app_state` if it has been marked dirty and the debounce
@@ -513,25 +513,25 @@ impl SideromelaneApp {
     /// Drain pending menu events and dispatch each one. Bounded per frame
     /// for the same reason `drain_indexer_events` is bounded — a hostile or
     /// pathological burst must not starve UI input handling.
-    fn drain_menu_events(&mut self) {
+    fn drain_menu_events(&mut self, ctx: &egui::Context) {
         for _ in 0..MAX_INDEXER_EVENTS_PER_FRAME {
             let Some(action) = self.app_menu.as_ref().and_then(AppMenu::poll) else {
                 break;
             };
-            self.dispatch_menu_action(action);
+            self.dispatch_menu_action(action, ctx);
         }
     }
 
-    fn dispatch_menu_action(&mut self, action: MenuAction) {
+    fn dispatch_menu_action(&mut self, action: MenuAction, ctx: &egui::Context) {
         match action {
-            MenuAction::OpenFolder => self.pick_folder(),
+            MenuAction::OpenFolder => self.pick_folder(ctx),
             MenuAction::NewNote => self.new_note(),
             MenuAction::Save => self.save_selected(),
             MenuAction::Close => self.close_active_note(),
             MenuAction::ToggleGraph => self.toggle_graph_mode(),
             MenuAction::ToggleWordWrap => self.toggle_word_wrap(),
             MenuAction::ShowPreferences => self.show_preferences(),
-            MenuAction::OpenRecent(path) => self.open_folder(path),
+            MenuAction::OpenRecent(path) => self.open_folder(path, ctx),
         }
     }
 

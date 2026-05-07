@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
+use eframe::egui;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{
     DebounceEventResult, DebouncedEventKind, Debouncer, new_debouncer, notify::RecommendedWatcher,
@@ -70,11 +71,16 @@ impl std::fmt::Debug for Watcher {
 impl Watcher {
     /// Start watching `root` recursively.
     ///
+    /// The supplied `context` is cloned into the debouncer callback and
+    /// `request_repaint` is called after each successful event enqueue so
+    /// that watcher activity wakes an idle UI thread, mirroring
+    /// [`crate::indexer::Indexer::new`].
+    ///
     /// # Errors
     ///
     /// Returns an [`io::Error`] when the underlying notify watcher fails to
     /// initialize (e.g. permission denied, kernel limit reached).
-    pub fn new(root: &Path) -> io::Result<Self> {
+    pub fn new(root: &Path, context: egui::Context) -> io::Result<Self> {
         let (events_tx, events_rx) = mpsc::channel::<WatchEvent>();
 
         let mut debouncer = new_debouncer(DEBOUNCE_WINDOW, move |result: DebounceEventResult| {
@@ -91,11 +97,17 @@ impl Watcher {
                     _ => WatchKind::Other,
                 };
                 // Send is best-effort: if the receiver is gone we are about to
-                // be dropped anyway.
-                let _ = events_tx.send(WatchEvent {
-                    path: event.path,
-                    kind,
-                });
+                // be dropped anyway. Wake the UI thread on each successful
+                // enqueue so an idle event loop picks the event up promptly.
+                if events_tx
+                    .send(WatchEvent {
+                        path: event.path,
+                        kind,
+                    })
+                    .is_ok()
+                {
+                    context.request_repaint();
+                }
             }
         })
         .map_err(io::Error::other)?;
@@ -123,6 +135,7 @@ mod tests {
     use std::fs;
     use std::time::{Duration, Instant};
 
+    use eframe::egui;
     use tempfile::TempDir;
 
     use super::{WatchKind, Watcher};
@@ -146,7 +159,8 @@ mod tests {
     #[test]
     fn watcher_emits_event_for_external_write() {
         let directory = TempDir::new().expect("create tempdir");
-        let watcher = Watcher::new(directory.path()).expect("start watcher");
+        let watcher =
+            Watcher::new(directory.path(), egui::Context::default()).expect("start watcher");
 
         // Give the platform watcher a beat to attach before the write.
         std::thread::sleep(Duration::from_millis(100));
@@ -166,7 +180,8 @@ mod tests {
     #[test]
     fn dropping_watcher_does_not_hang() {
         let directory = TempDir::new().expect("create tempdir");
-        let watcher = Watcher::new(directory.path()).expect("start watcher");
+        let watcher =
+            Watcher::new(directory.path(), egui::Context::default()).expect("start watcher");
         let start = Instant::now();
         drop(watcher);
         assert!(
