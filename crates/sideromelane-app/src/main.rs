@@ -1188,14 +1188,21 @@ impl SideromelaneApp {
             };
             let title = format!("{} changed on disk", note_id.file_stem());
             let window_id = egui::Id::new(("sm-conflict", note_id.relative_path()));
-            let mut keep_open = true;
             let mut action: Option<ConflictChoice> = None;
 
+            // Intentionally not passing `.open(&mut bool)`: without it egui
+            // does not render a window-level close (X) button, so the user
+            // must explicitly choose Reload or Keep mine. Closing via the OS
+            // chrome would otherwise be ambiguous, and silently mapping it
+            // to "Keep mine" was destructive — the next auto-save would
+            // overwrite the on-disk version the user may have intended to
+            // keep. The window is also non-collapsible / non-resizable /
+            // non-movable to keep the affordance focused on the choice.
             egui::Window::new(title)
                 .id(window_id)
                 .collapsible(false)
                 .resizable(false)
-                .open(&mut keep_open)
+                .movable(false)
                 .show(context, |ui| {
                     ui.label(
                         "This file was modified outside Sideromelane while \
@@ -1210,13 +1217,6 @@ impl SideromelaneApp {
                         }
                     });
                 });
-
-            // Treat an OS-level close (X button) as "Keep mine"; the buffer
-            // already reflects the user's edits and the next auto-save will
-            // overwrite the disk version.
-            if !keep_open && action.is_none() {
-                action = Some(ConflictChoice::Keep);
-            }
 
             match action {
                 Some(ConflictChoice::Reload) => {
