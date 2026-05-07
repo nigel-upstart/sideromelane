@@ -122,6 +122,10 @@ struct FolderState {
     /// for the current folder. Until then the search/backlinks/graph panels
     /// surface a placeholder rather than a misleading empty state.
     indexes_ready: bool,
+    /// Cached file-tree rendering view. Rebuilt lazily in `left_panel` and
+    /// invalidated whenever the underlying note set changes (indexer events,
+    /// `new_note`, image embed inserts).
+    cached_tree: Option<tree::Tree>,
 }
 
 impl FolderState {
@@ -146,6 +150,7 @@ impl FolderState {
             folder_index: FolderIndex::default(),
             settings,
             indexes_ready: false,
+            cached_tree: None,
         })
     }
 
@@ -225,6 +230,7 @@ impl SideromelaneApp {
             dirty: true,
         });
         folder.selected = Some(folder.notes.len() - 1);
+        folder.cached_tree = None;
         let scan_root = folder.root.clone();
         self.active_block_index = None;
         // Adding an unsaved note to disk is deferred to save; still trigger a
@@ -290,6 +296,7 @@ impl SideromelaneApp {
             IndexerEvent::NotesDiscovered(records) => {
                 if let Some(folder) = self.folder.as_mut() {
                     merge_discovered_notes(folder, records);
+                    folder.cached_tree = None;
                 }
             }
             IndexerEvent::IndexUpdated {
@@ -300,6 +307,7 @@ impl SideromelaneApp {
                     folder.search_index = search;
                     folder.folder_index = folder_index;
                     folder.indexes_ready = true;
+                    folder.cached_tree = None;
                 }
             }
         }
@@ -405,6 +413,7 @@ impl SideromelaneApp {
                 note.source.push_str("]]\n");
                 note.dirty = true;
                 self.status = format!("Inserted {relative_target}");
+                folder.cached_tree = None;
                 let scan_root = folder.root.clone();
                 self.dispatch_rescan(scan_root);
             }
@@ -439,12 +448,18 @@ impl SideromelaneApp {
         }
 
         let mut selected_note = folder.selected;
-        let note_ids: Vec<NoteId> = folder
-            .notes
-            .iter()
-            .map(|record| record.note_id.clone())
-            .collect();
-        let folder_tree = tree::build_tree(&note_ids);
+        // Temporarily move the cached tree out of `folder` so we can pass
+        // `&mut folder` into the render helpers (which need to mutate
+        // `folder.settings.ui.tree_expanded_paths`). The cache is restored
+        // before the function returns. Build on demand if missing.
+        let folder_tree = folder.cached_tree.take().unwrap_or_else(|| {
+            let note_ids: Vec<NoteId> = folder
+                .notes
+                .iter()
+                .map(|record| record.note_id.clone())
+                .collect();
+            tree::build_tree(&note_ids)
+        });
         let mut tree_changed = false;
 
         egui::ScrollArea::vertical()
@@ -458,6 +473,7 @@ impl SideromelaneApp {
                     render_dir(ui, folder, &mut selected_note, subdir, 0, &mut tree_changed);
                 }
             });
+        folder.cached_tree = Some(folder_tree);
 
         if selected_note != folder.selected {
             folder.selected = selected_note;
