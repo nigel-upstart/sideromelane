@@ -8,6 +8,7 @@ mod preferences;
 mod preview;
 mod state;
 mod tree;
+mod watcher;
 
 use std::fs::{self, File};
 use std::io as std_io;
