@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use eframe::egui::{self, Color32, Pos2};
 use egui_graphs::{
     DefaultEdgeShape, DefaultNodeShape, FruchtermanReingold, FruchtermanReingoldState, Graph,
-    GraphView, LayoutForceDirected, SettingsInteraction, SettingsStyle,
+    GraphView, LayoutForceDirected, SettingsInteraction, SettingsStyle, reset,
 };
 use petgraph::{Directed, stable_graph::DefaultIx};
 use sideromelane_core::{FolderIndex, GraphNode, Neighborhood, NoteId};
@@ -99,13 +99,19 @@ pub fn draw(
     let neighborhood = folder_index.neighborhood(focus, depth);
     let signature = NeighborhoodSignature::new(focus, &neighborhood);
 
-    if state.signature.as_ref() != Some(&signature) {
+    let graph_changed = state.signature.as_ref() != Some(&signature);
+    if graph_changed {
         state.cached = Some(build_graph(focus, &neighborhood));
         state.signature = Some(signature);
         state.last_selection.clear();
     }
 
     let graph = state.cached.as_mut()?;
+
+    if graph_changed {
+        reset::<FruchtermanReingoldState>(ui, None);
+        NoteGraphView::fast_forward_budgeted(ui, graph, 300, 50, None);
+    }
 
     let mut widget = NoteGraphView::new(graph)
         .with_styles(&SettingsStyle::default().with_labels_always(true))
@@ -122,16 +128,25 @@ pub fn draw(
 /// Builds an [`egui_graphs::Graph`] from the supplied neighborhood.
 ///
 /// Note nodes use the default (blue) fill; tag nodes use a soft purple and the
-/// label is prefixed with `#`. The focus node is seeded at the origin.
+/// label is prefixed with `#`. The focus node is seeded at the origin; all
+/// others are placed on an evenly-spaced circle so the force-directed layout
+/// has well-defined initial forces to work with.
 fn build_graph(focus: &GraphNode, neighborhood: &Neighborhood) -> NoteGraph {
     let mut graph = NoteGraph::new(petgraph::stable_graph::StableGraph::default());
     let mut indices = BTreeMap::new();
+
+    let non_focus: Vec<&GraphNode> = neighborhood.nodes.iter().filter(|n| *n != focus).collect();
+    let count = non_focus.len().max(1);
 
     for node in &neighborhood.nodes {
         let location = if node == focus {
             Pos2::ZERO
         } else {
-            Pos2::new(0.0, 0.0)
+            let i = non_focus.iter().position(|n| *n == node).unwrap_or(0);
+            // Node counts never exceed a few thousand; precision loss is negligible.
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let angle = 2.0_f32 * std::f32::consts::PI * i as f32 / count as f32;
+            Pos2::new(150.0 * angle.cos(), 150.0 * angle.sin())
         };
 
         let label = node_label(node);
