@@ -3,6 +3,9 @@
 //! pass, and the cursor-jump apply helpers all live here so `main.rs` can
 //! stay focused on app-level orchestration.
 
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::Range;
 use std::path::Path;
 
 use eframe::egui::{self, Sense};
@@ -10,6 +13,92 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use crate::NoteRecord;
 use crate::preview::{NOTE_LINK_SCHEME, transform_wiki_links};
+
+/// Cached output of the per-block live-preview pre-pass. `transformed` is the
+/// `CommonMark`-shaped text that gets fed to `egui_commonmark`; `link_targets`
+/// is the precomputed set of `sideromelane://note/...` URLs registered with
+/// the cache so the per-frame pass does not have to re-scan the rendered
+/// text every frame.
+#[derive(Debug, Clone)]
+pub struct CachedBlockPreview {
+    pub transformed: String,
+    pub link_targets: Vec<String>,
+}
+
+/// Per-block memo keyed by `(byte range in current source, fast hash of text)`.
+/// Stale entries (mismatching range, or text mutated under a stable range)
+/// fall through automatically because the key changes; the live-preview
+/// renderer also sweeps stale `range` keys at the start of each frame.
+pub type BlockPreviewCache = HashMap<(Range<usize>, u64), CachedBlockPreview>;
+
+/// Hash a block's text into a 64-bit fingerprint used as part of the cache
+/// key. `DefaultHasher` is allocation-free and fast enough for per-block
+/// hashing of small markdown chunks; collisions only mean a recompute, never
+/// a correctness bug.
+#[must_use]
+pub fn hash_block_text(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Look up the cached pre-pass output for a block, computing it via
+/// `compute` if absent. The closure is invoked at most once per
+/// `(range, hash)` key so live preview can amortize `transform_wiki_links`
+/// + link extraction across frames.
+pub fn get_or_insert_cached_preview<F>(
+    cache: &mut BlockPreviewCache,
+    range: Range<usize>,
+    hash: u64,
+    compute: F,
+) -> &CachedBlockPreview
+where
+    F: FnOnce() -> CachedBlockPreview,
+{
+    cache.entry((range, hash)).or_insert_with(compute)
+}
+
+/// Drop entries whose range is not present in `current_ranges`. Called at the
+/// start of every live-preview frame so the cache stays bounded by the
+/// current block layout. This is O(`blocks` * `cache_entries`) but both sides
+/// are small per note in practice.
+pub fn sweep_stale_block_previews(cache: &mut BlockPreviewCache, current_ranges: &[Range<usize>]) {
+    cache.retain(|(range, _hash), _| current_ranges.contains(range));
+}
+
+/// Extract every `sideromelane://note/...` URL appearing in `text`, in
+/// document order, deduplicated. Used to populate
+/// [`CachedBlockPreview::link_targets`] without re-scanning the rendered
+/// text on every frame.
+fn extract_note_link_targets(text: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut cursor = 0;
+    while let Some(rel) = text[cursor..].find(NOTE_LINK_SCHEME) {
+        let start = cursor + rel;
+        let after = start + NOTE_LINK_SCHEME.len();
+        let end = text[after..]
+            .find([')', ' ', '\n', '\r', '\t', '"', '<', '>'])
+            .map_or(text.len(), |rel_end| after + rel_end);
+        let url = text[start..end].to_owned();
+        if !targets.contains(&url) {
+            targets.push(url);
+        }
+        cursor = end;
+    }
+    targets
+}
+
+/// Register the precomputed `link_targets` from a cached preview with the
+/// `CommonMark` cache. Replaces the old per-frame `register_note_links`
+/// scan over the rendered text — the targets are already memoised in
+/// [`CachedBlockPreview::link_targets`].
+fn register_cached_link_targets(cache: &mut CommonMarkCache, targets: &[String]) {
+    for url in targets {
+        if cache.get_link_hook(url).is_none() {
+            cache.add_link_hook(url);
+        }
+    }
+}
 
 /// Returns a layouter closure that prevents text wrapping. `LayoutJob::simple`
 /// already sets `wrap.max_width` to the value we pass in, so `f32::INFINITY`
@@ -92,9 +181,17 @@ pub fn live_preview_editor(
     pending_jump: &mut Option<usize>,
     folder_root: &Path,
     cache: &mut CommonMarkCache,
+    block_preview_cache: &mut BlockPreviewCache,
     pending_link_click: &mut Option<String>,
 ) -> bool {
     let blocks = markdown_blocks(&note.source);
+
+    // Sweep stale entries before rendering so the cache stays bounded by the
+    // current block layout. This pays for itself across frames because the
+    // alternative — recomputing `transform_wiki_links` for every block on
+    // every frame — is far costlier.
+    let current_ranges: Vec<Range<usize>> = blocks.iter().map(|b| b.range.clone()).collect();
+    sweep_stale_block_previews(block_preview_cache, &current_ranges);
 
     // Resolve a pending jump to a block index before rendering.
     if let Some(offset) = pending_jump.take() {
@@ -129,12 +226,35 @@ pub fn live_preview_editor(
                         changed_block = Some((block.range.clone(), text));
                     }
                 } else {
-                    // Pre-pass: rewrite wiki links and image embeds to CommonMark.
-                    let transformed = transform_wiki_links(&block.text, folder_root);
+                    // Per-block memo: amortise `transform_wiki_links` and the
+                    // link-target scan across frames. Cache key combines the
+                    // block's byte range with a fast hash of its text so any
+                    // edit in the active block invalidates downstream entries
+                    // whose ranges shift, and any in-place edit changes the
+                    // hash.
+                    let hash = hash_block_text(&block.text);
+                    let block_text = block.text.clone();
+                    let block_root = folder_root.to_path_buf();
+                    let cached = get_or_insert_cached_preview(
+                        block_preview_cache,
+                        block.range.clone(),
+                        hash,
+                        || {
+                            let transformed = transform_wiki_links(&block_text, &block_root);
+                            let link_targets = extract_note_link_targets(&transformed);
+                            CachedBlockPreview {
+                                transformed,
+                                link_targets,
+                            }
+                        },
+                    );
+                    let transformed = cached.transformed.clone();
+                    let link_targets = cached.link_targets.clone();
 
                     // Register every in-app link so `egui_commonmark` routes clicks
-                    // through the cache instead of the OS browser.
-                    register_note_links(cache, &transformed);
+                    // through the cache instead of the OS browser. We feed the
+                    // precomputed target list rather than rescanning the rendered text.
+                    register_cached_link_targets(cache, &link_targets);
 
                     // The viewer needs a stable, unique source id per block to keep
                     // its scrollable state. Combine the note stem with the block index.
@@ -175,25 +295,6 @@ pub fn live_preview_editor(
         true
     } else {
         false
-    }
-}
-
-/// Registers every `sideromelane://note/...` URL appearing in `text` with the cache so
-/// `egui_commonmark` renders them as in-app links rather than OS-browser hyperlinks.
-pub fn register_note_links(cache: &mut CommonMarkCache, text: &str) {
-    let mut cursor = 0;
-    while let Some(rel) = text[cursor..].find(NOTE_LINK_SCHEME) {
-        let start = cursor + rel;
-        let after = start + NOTE_LINK_SCHEME.len();
-        // The URL ends at the first character disallowed in a Markdown link target.
-        let end = text[after..]
-            .find([')', ' ', '\n', '\r', '\t', '"', '<', '>'])
-            .map_or(text.len(), |rel_end| after + rel_end);
-        let url = &text[start..end];
-        if cache.get_link_hook(url).is_none() {
-            cache.add_link_hook(url);
-        }
-        cursor = end;
     }
 }
 
@@ -351,4 +452,110 @@ fn heading_level(line: &str) -> Option<u8> {
 
 fn is_list_line(line: &str) -> bool {
     line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ")
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::single_range_in_vec_init)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::{
+        BlockPreviewCache, CachedBlockPreview, extract_note_link_targets,
+        get_or_insert_cached_preview, hash_block_text, sweep_stale_block_previews,
+    };
+
+    #[test]
+    fn get_or_insert_cached_preview_invokes_compute_once_per_key() {
+        let mut cache = BlockPreviewCache::new();
+        let calls = Cell::new(0u32);
+        let range = 0..10;
+        let hash = hash_block_text("body");
+
+        let first = get_or_insert_cached_preview(&mut cache, range.clone(), hash, || {
+            calls.set(calls.get() + 1);
+            CachedBlockPreview {
+                transformed: "out".to_owned(),
+                link_targets: Vec::new(),
+            }
+        });
+        assert_eq!(first.transformed, "out");
+        assert_eq!(calls.get(), 1, "compute should run on miss");
+
+        let second = get_or_insert_cached_preview(&mut cache, range, hash, || {
+            calls.set(calls.get() + 1);
+            CachedBlockPreview {
+                transformed: "should not be used".to_owned(),
+                link_targets: Vec::new(),
+            }
+        });
+        assert_eq!(
+            second.transformed, "out",
+            "second call must reuse the cached value"
+        );
+        assert_eq!(calls.get(), 1, "compute must not run on hit");
+    }
+
+    #[test]
+    fn get_or_insert_cached_preview_misses_on_hash_change() {
+        let mut cache = BlockPreviewCache::new();
+        let range = 0..10;
+
+        let calls = Cell::new(0u32);
+        get_or_insert_cached_preview(&mut cache, range.clone(), 1, || {
+            calls.set(calls.get() + 1);
+            CachedBlockPreview {
+                transformed: String::new(),
+                link_targets: Vec::new(),
+            }
+        });
+        get_or_insert_cached_preview(&mut cache, range, 2, || {
+            calls.set(calls.get() + 1);
+            CachedBlockPreview {
+                transformed: String::new(),
+                link_targets: Vec::new(),
+            }
+        });
+        assert_eq!(
+            calls.get(),
+            2,
+            "hash change must produce a fresh cache miss"
+        );
+    }
+
+    #[test]
+    fn sweep_stale_block_previews_drops_entries_outside_current_layout() {
+        let mut cache = BlockPreviewCache::new();
+        cache.insert(
+            (0..10, 1),
+            CachedBlockPreview {
+                transformed: "a".to_owned(),
+                link_targets: Vec::new(),
+            },
+        );
+        cache.insert(
+            (10..20, 2),
+            CachedBlockPreview {
+                transformed: "b".to_owned(),
+                link_targets: Vec::new(),
+            },
+        );
+
+        sweep_stale_block_previews(&mut cache, &[0..10]);
+
+        assert!(cache.contains_key(&(0..10, 1)), "0..10 must survive sweep");
+        assert!(!cache.contains_key(&(10..20, 2)), "10..20 must be evicted");
+    }
+
+    #[test]
+    fn extract_note_link_targets_collects_unique_urls() {
+        let text = "see [a](sideromelane://note/A) and [b](sideromelane://note/B) and [a again](sideromelane://note/A)";
+        let targets = extract_note_link_targets(text);
+        assert_eq!(
+            targets,
+            vec![
+                "sideromelane://note/A".to_owned(),
+                "sideromelane://note/B".to_owned(),
+            ]
+        );
+    }
 }

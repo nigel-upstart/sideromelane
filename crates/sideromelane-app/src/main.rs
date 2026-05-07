@@ -32,7 +32,7 @@ use crate::autosave::{AutoSaveOutcome, SELF_WRITE_SUPPRESS_WINDOW, auto_save_dir
 use crate::conflict::{
     MAX_PENDING_CONFLICTS, WatchOutcome, apply_reload, canonicalize_path, classify_watch_event,
 };
-use crate::editor::{live_preview_editor, raw_editor};
+use crate::editor::{BlockPreviewCache, live_preview_editor, raw_editor};
 use crate::indexer::{Indexer, IndexerCommand, IndexerEvent};
 use crate::io::safe_write;
 use crate::menu::{AppMenu, MenuAction};
@@ -95,6 +95,10 @@ struct SideromelaneApp {
     /// Caches `egui_commonmark` rendering state (image fetches, syntax-highlighting state,
     /// and the link-hooks registry) across frames so per-block renders are stable.
     commonmark_cache: CommonMarkCache,
+    /// Per-block memo for the live-preview pre-pass. Avoids re-running
+    /// `transform_wiki_links` and the link-target scan on every frame for
+    /// blocks whose `(range, hash)` key has not changed.
+    block_preview_cache: BlockPreviewCache,
     /// Set when the user clicks a `sideromelane://note/<NAME>` link in a rendered block.
     /// Drained by `main_panel` after render to navigate to the target note.
     pending_link_click: Option<String>,
@@ -141,6 +145,7 @@ impl SideromelaneApp {
             preferences_window: PreferencesWindow::default(),
             startup_pending: true,
             commonmark_cache: CommonMarkCache::default(),
+            block_preview_cache: BlockPreviewCache::new(),
             pending_link_click: None,
             app_menu: None,
             last_self_write_at: HashMap::new(),
@@ -1165,6 +1170,7 @@ impl SideromelaneApp {
                 &mut self.pending_jump,
                 &folder_root,
                 &mut self.commonmark_cache,
+                &mut self.block_preview_cache,
                 &mut self.pending_link_click,
             ),
             EditorMode::Graph => {
