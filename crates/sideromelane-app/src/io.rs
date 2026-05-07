@@ -63,6 +63,61 @@ pub fn safe_write(path: &Path, source: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Write `payload` to `path` atomically.
+///
+/// Wired into the boot path in a follow-up commit; declared `pub` so the
+/// state module can use it without going through the test harness.
+///
+/// Sibling to [`safe_write`] for non-Markdown writers (app-local state,
+/// preferences, etc.). The same temp-file + `sync_data` + rename + best-effort
+/// parent-fsync pattern is used. Differs from `safe_write` in two ways:
+///
+/// 1. Accepts arbitrary bytes rather than a `&str`.
+/// 2. Uses a generic `<filename>.tmp` sibling rather than `.md.tmp`, and skips
+///    the symlink guard since callers write files inside an app-owned data
+///    directory rather than a user-visible notes folder.
+///
+/// # Errors
+///
+/// Returns the first IO error encountered while creating directories, writing,
+/// fsyncing, or renaming.
+#[allow(dead_code)] // Used by `state::AppState::save`; the call site is
+// added in a follow-up commit.
+pub fn safe_write_bytes(path: &Path, payload: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "safe_write_bytes requires a UTF-8 filename",
+            )
+        })?;
+    let temporary_path = path.with_file_name(format!("{file_name}.tmp"));
+
+    {
+        let mut file = File::create(&temporary_path)?;
+        file.write_all(payload)?;
+        file.sync_data()?;
+    }
+
+    fs::rename(&temporary_path, path)?;
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = File::open(parent).and_then(|directory| directory.sync_all());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
