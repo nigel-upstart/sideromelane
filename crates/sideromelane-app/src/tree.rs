@@ -28,30 +28,28 @@ pub struct DirNode {
 /// (sorted by name) and notes that sit at the folder root (sorted by stem).
 #[must_use]
 pub fn build_tree(notes: &[NoteId]) -> Tree {
-    let mut root_dirs: BTreeMap<String, DirNode> = BTreeMap::new();
+    let mut root_dirs: BTreeMap<String, MutableDirNode> = BTreeMap::new();
     let mut root_notes: Vec<NoteId> = Vec::new();
 
     for note in notes {
-        let components: Vec<String> = note
-            .relative_path()
-            .components()
-            .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
-            .collect();
-        if components.len() <= 1 {
-            root_notes.push(note.clone());
+        let components = path_components(note.relative_path());
+        let Some((_, dir_components)) = components.split_last() else {
             continue;
+        };
+        if dir_components.is_empty() {
+            root_notes.push(note.clone());
+        } else {
+            insert_path(&mut root_dirs, "", dir_components, note.clone());
         }
-        let dir_components = &components[..components.len() - 1];
-        insert_dir(&mut root_dirs, dir_components, note.clone());
     }
 
+    root_notes.sort_by(|left, right| left.file_stem().cmp(right.file_stem()));
     Tree {
-        subdirs: root_dirs.into_values().map(finalize).collect(),
-        root_notes: {
-            let mut sorted = root_notes;
-            sorted.sort_by(|left, right| left.file_stem().cmp(right.file_stem()));
-            sorted
-        },
+        subdirs: root_dirs
+            .into_values()
+            .map(MutableDirNode::finalize)
+            .collect(),
+        root_notes,
     }
 }
 
@@ -69,54 +67,55 @@ pub struct Tree {
 /// is not.
 #[must_use]
 pub fn ancestor_paths(note: &NoteId) -> Vec<String> {
-    let components: Vec<String> = note
-        .relative_path()
-        .components()
-        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
-        .collect();
-    if components.len() <= 1 {
+    let components = path_components(note.relative_path());
+    let Some((_, dir_components)) = components.split_last() else {
         return Vec::new();
-    }
-
-    let mut ancestors = Vec::new();
-    let dir_components = &components[..components.len() - 1];
-    for index in 1..=dir_components.len() {
-        ancestors.push(dir_components[..index].join("/"));
-    }
-    ancestors
-}
-
-fn insert_dir(dirs: &mut BTreeMap<String, DirNode>, components: &[String], note: NoteId) {
-    let Some((head, rest)) = components.split_first() else {
-        return;
     };
-    let entry = dirs.entry(head.clone()).or_insert_with(|| DirNode {
-        relative_path: head.clone(),
-        name: head.clone(),
-        subdirs: Vec::new(),
-        notes: Vec::new(),
-    });
+    (1..=dir_components.len())
+        .map(|index| dir_components[..index].join("/"))
+        .collect()
+}
 
-    if rest.is_empty() {
-        entry.notes.push(note);
-    } else {
-        let mut nested: BTreeMap<String, DirNode> = entry
-            .subdirs
-            .drain(..)
-            .map(|node| (node.name.clone(), node))
-            .collect();
-        let mut child_components = Vec::with_capacity(rest.len());
-        let parent_prefix = entry.relative_path.clone();
-        for component in rest {
-            child_components.push(component.clone());
+fn path_components(path: &std::path::Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
+        .collect()
+}
+
+/// Mutable construction-time mirror of [`DirNode`] using a `BTreeMap` for
+/// subdirectories so inserts are O(log N) rather than the drain-and-rebuild
+/// dance that a `Vec` would force at every level.
+struct MutableDirNode {
+    relative_path: String,
+    name: String,
+    subdirs: BTreeMap<String, Self>,
+    notes: Vec<NoteId>,
+}
+
+impl MutableDirNode {
+    const fn new(name: String, relative_path: String) -> Self {
+        Self {
+            relative_path,
+            name,
+            subdirs: BTreeMap::new(),
+            notes: Vec::new(),
         }
-        insert_into_nested(&mut nested, &parent_prefix, &child_components, note);
-        entry.subdirs = nested.into_values().collect();
+    }
+
+    fn finalize(self) -> DirNode {
+        let mut notes = self.notes;
+        notes.sort_by(|left, right| left.file_stem().cmp(right.file_stem()));
+        DirNode {
+            relative_path: self.relative_path,
+            name: self.name,
+            subdirs: self.subdirs.into_values().map(Self::finalize).collect(),
+            notes,
+        }
     }
 }
 
-fn insert_into_nested(
-    dirs: &mut BTreeMap<String, DirNode>,
+fn insert_path(
+    dirs: &mut BTreeMap<String, MutableDirNode>,
     parent_prefix: &str,
     components: &[String],
     note: NoteId,
@@ -124,35 +123,21 @@ fn insert_into_nested(
     let Some((head, rest)) = components.split_first() else {
         return;
     };
-    let relative_path = format!("{parent_prefix}/{head}");
-    let entry = dirs.entry(head.clone()).or_insert_with(|| DirNode {
-        relative_path: relative_path.clone(),
-        name: head.clone(),
-        subdirs: Vec::new(),
-        notes: Vec::new(),
-    });
+    let relative_path = if parent_prefix.is_empty() {
+        head.clone()
+    } else {
+        format!("{parent_prefix}/{head}")
+    };
+    let entry = dirs
+        .entry(head.clone())
+        .or_insert_with(|| MutableDirNode::new(head.clone(), relative_path.clone()));
 
     if rest.is_empty() {
         entry.notes.push(note);
     } else {
-        let mut nested: BTreeMap<String, DirNode> = entry
-            .subdirs
-            .drain(..)
-            .map(|node| (node.name.clone(), node))
-            .collect();
-        let nested_parent = entry.relative_path.clone();
-        insert_into_nested(&mut nested, &nested_parent, rest, note);
-        entry.subdirs = nested.into_values().collect();
+        let nested_prefix = entry.relative_path.clone();
+        insert_path(&mut entry.subdirs, &nested_prefix, rest, note);
     }
-}
-
-fn finalize(mut node: DirNode) -> DirNode {
-    node.notes
-        .sort_by(|left, right| left.file_stem().cmp(right.file_stem()));
-    let mut sorted_subdirs: Vec<DirNode> = node.subdirs.drain(..).collect();
-    sorted_subdirs.sort_by(|left, right| left.name.cmp(&right.name));
-    node.subdirs = sorted_subdirs.into_iter().map(finalize).collect();
-    node
 }
 
 #[cfg(test)]
