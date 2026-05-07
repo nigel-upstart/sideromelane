@@ -64,6 +64,39 @@ settings file today, so world-readable permissions are acceptable. If
 per-folder settings ever hold sensitive material (API keys, auth tokens) the
 save path should switch to `0o600` mode-restricted writes.
 
+## Deferred review findings (post-Spec 0002)
+
+The following items surfaced during the Wave-1 review pass after Spec 0002
+landed. None are user-visible today; each is recorded with a triggering
+condition under which a follow-up should land.
+
+### Graph `NeighborhoodSignature` clones+sorts every frame
+
+`crates/sideromelane-app/src/graph_view.rs:62-65` rebuilds the neighborhood
+signature on every frame the graph view renders, which means a clone and
+sort of the focused note's neighbor list at frame rate. Caching by
+`(focus, folder_index_revision)` is the right fix and keeps the data
+correct across folder reloads. Pass on now since the graph mode is not on
+a hot UI path; revisit when the graph is heavily used in practice or when
+folders with very large neighborhoods become common.
+
+### `app_state.last_note` allocates per frame in selection comparison
+
+`crates/sideromelane-app/src/main.rs:225-233` recomputes the selected
+note's relative path via `.display().to_string()` every frame to compare
+against `app_state.last_note`. Cache the selection as `Option<NoteId>` to
+avoid the per-frame allocation. Steady-state path with no observable
+impact today; pick this up the next time `app_state` writes are touched.
+
+### muda menu labels don't strip control characters
+
+`crates/sideromelane-app/src/menu.rs::display_label` builds menu titles
+from path components without stripping ASCII control characters. macOS
+`NSMenuItem` titles strip control chars at the OS level so the rendered
+label is benign, but a defense-in-depth fix is to strip on our side as
+well. Pass for now; revisit if we add non-macOS targets where the OS
+guarantee no longer applies.
+
 ## Consequences
 
 - These constraints are documented and will not surface as surprise findings
