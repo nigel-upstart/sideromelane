@@ -31,6 +31,18 @@ pub fn safe_write(path: &Path, source: &str) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
 
+    // Guard against writing through a symlink, which would allow the rename
+    // to escape the folder root (e.g. `Note.md → /etc/hosts`).
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to overwrite symlinked path",
+            ));
+        }
+        _ => {}
+    }
+
     let temporary_path = path.with_extension("md.tmp");
 
     {
@@ -111,5 +123,46 @@ mod tests {
         safe_write(&path, "content").expect("write");
 
         assert_eq!(fs::read_to_string(&path).expect("read file"), "content",);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_write_through_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new().expect("create temp directory");
+        let target_path = directory.path().join("target.md");
+        let note_path = directory.path().join("note.md");
+
+        fs::write(&target_path, "original").expect("write target");
+        symlink(&target_path, &note_path).expect("create symlink");
+
+        let result = safe_write(&note_path, "new");
+        assert!(result.is_err(), "expected Err but got Ok");
+        let error = result.expect_err("safe_write must fail on symlink");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "expected InvalidInput error kind",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to overwrite symlinked path"),
+            "unexpected error message: {error}",
+        );
+
+        // Symlink must still point at target.md.
+        let link_meta = fs::symlink_metadata(&note_path).expect("symlink still exists");
+        assert!(
+            link_meta.file_type().is_symlink(),
+            "note.md must remain a symlink"
+        );
+
+        // Target content must be unchanged.
+        assert_eq!(
+            fs::read_to_string(&target_path).expect("read target"),
+            "original",
+        );
     }
 }
