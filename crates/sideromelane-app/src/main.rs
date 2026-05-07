@@ -1849,16 +1849,15 @@ fn classify_watch_event(
     {
         return WatchOutcome::Suppressed;
     }
+    // Match strictly by absolute path. We used to fall back to a file-name
+    // match to paper over macOS canonicalization (`/private/tmp/...`), but
+    // that fallback let a hostile sibling like `attacker/Note.md` impersonate
+    // a tracked `notes/Note.md` since the watcher is recursive. The
+    // canonicalization pinch is now solved by canonicalising both sides
+    // (see `canonicalize_path` and the self-write suppression keys).
     let target_index = notes
         .iter()
-        .position(|note| note.absolute_path == event.path)
-        .or_else(|| {
-            event.path.file_name().and_then(|name| {
-                notes
-                    .iter()
-                    .position(|note| note.absolute_path.file_name() == Some(name))
-            })
-        });
+        .position(|note| note.absolute_path == event.path);
     match target_index {
         None => WatchOutcome::UnknownPath,
         Some(index) if notes[index].dirty => WatchOutcome::Conflict(notes[index].note_id.clone()),
