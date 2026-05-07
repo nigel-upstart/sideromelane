@@ -197,12 +197,15 @@ pub fn live_preview_editor(
     let current_ranges: Vec<Range<usize>> = blocks.iter().map(|b| b.range.clone()).collect();
     sweep_stale_block_previews(block_preview_cache, &current_ranges);
 
-    // Resolve a pending jump to a block index before rendering.
+    // Resolve a pending jump to a block index before rendering. If the
+    // offset falls past the last block (e.g. trailing whitespace beyond all
+    // parsed blocks) we clamp to the last block rather than the first, since
+    // jumping backwards would surprise the user.
     if let Some(offset) = pending_jump.take() {
         *active_block_index = blocks
             .iter()
             .position(|b| b.range.start <= offset && offset < b.range.end)
-            .or(if blocks.is_empty() { None } else { Some(0) });
+            .or_else(|| blocks.len().checked_sub(1));
     }
 
     let mut changed_block = None;
