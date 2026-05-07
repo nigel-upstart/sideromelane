@@ -645,59 +645,34 @@ impl SideromelaneApp {
     }
 
     fn apply_watch_event(&mut self, event: &watcher::WatchEvent) {
-        // Only modify-class events trigger reloads / conflict prompts. The
-        // `Other` variant is reserved for future categories the UI does not
-        // need to react to today.
-        if event.kind != watcher::WatchKind::Modify {
-            return;
-        }
-        // Suppress events caused by our own writes within the configured window.
-        if let Some(stamp) = self.last_self_write_at.get(&event.path)
-            && stamp.elapsed() < SELF_WRITE_SUPPRESS_WINDOW
-        {
-            return;
-        }
-
         let Some(folder) = self.folder.as_mut() else {
             return;
         };
-
-        // Match the event path back to a known note. Notify can canonicalize
-        // through symlinks (e.g. `/private/tmp/...` on macOS), so fall back
-        // to a file-name comparison if a direct hit fails.
-        let target_index = folder
-            .notes
-            .iter()
-            .position(|note| note.absolute_path == event.path)
-            .or_else(|| {
-                event.path.file_name().and_then(|name| {
-                    folder
-                        .notes
-                        .iter()
-                        .position(|note| note.absolute_path.file_name() == Some(name))
-                })
-            });
-        let Some(index) = target_index else {
-            return;
-        };
-
-        let note = &mut folder.notes[index];
-        if note.dirty {
-            // Conflict: surface a non-blocking modal. Dedup so a burst of
-            // fs events for the same note collapses into one prompt.
-            if !self.pending_conflicts.contains(&note.note_id) {
-                self.pending_conflicts.push(note.note_id.clone());
-            }
-        } else {
-            // Silent reload: replace the buffer with whatever is on disk.
-            // Errors leave the buffer untouched and surface in the status bar.
-            match fs::read_to_string(&note.absolute_path) {
-                Ok(source) => {
-                    note.source = source;
-                    note.last_edit_at = Instant::now();
+        let now = Instant::now();
+        match classify_watch_event(
+            event,
+            &folder.notes,
+            &self.last_self_write_at,
+            SELF_WRITE_SUPPRESS_WINDOW,
+            now,
+        ) {
+            WatchOutcome::Ignored | WatchOutcome::Suppressed | WatchOutcome::UnknownPath => {}
+            WatchOutcome::Conflict(note_id) => {
+                if !self.pending_conflicts.contains(&note_id) {
+                    self.pending_conflicts.push(note_id);
                 }
-                Err(error) => {
-                    self.status = format!("Reload failed: {error}");
+            }
+            WatchOutcome::Reload { index } => {
+                let path = folder.notes[index].absolute_path.clone();
+                match fs::read_to_string(&path) {
+                    Ok(source) => {
+                        let note = &mut folder.notes[index];
+                        note.source = source;
+                        note.last_edit_at = now;
+                    }
+                    Err(error) => {
+                        self.status = format!("Reload failed: {error}");
+                    }
                 }
             }
         }
@@ -1817,6 +1792,64 @@ fn merge_discovered_notes(folder: &mut FolderState, discovered: Vec<indexer::Not
 }
 
 /// One successfully auto-saved note. Owns clones of the fields the caller
+/// Outcome of classifying a single watcher event against the in-memory
+/// note set. The caller mutates `folder.notes` / `pending_conflicts` /
+/// `self.status` based on this verdict — splitting the decision from the
+/// mutation keeps the dispatch testable without standing up a full app.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchOutcome {
+    /// Event kind is not modify-class. No-op.
+    Ignored,
+    /// Event arrived inside the self-write suppression window. No-op.
+    Suppressed,
+    /// Event path does not match any note in the current folder. No-op.
+    UnknownPath,
+    /// Note is dirty; queue a per-note conflict modal.
+    Conflict(NoteId),
+    /// Note is clean; reload notes[index].source from disk.
+    Reload {
+        /// Index into `notes` of the note that should be reloaded.
+        index: usize,
+    },
+}
+
+/// Pure dispatch helper for [`SideromelaneApp::apply_watch_event`]. Splits the
+/// suppress / reload / conflict decision from the mutation so it can be unit-
+/// tested without constructing a full [`SideromelaneApp`].
+fn classify_watch_event(
+    event: &watcher::WatchEvent,
+    notes: &[NoteRecord],
+    last_self_write_at: &HashMap<PathBuf, Instant>,
+    suppress_window: Duration,
+    now: Instant,
+) -> WatchOutcome {
+    if event.kind != watcher::WatchKind::Modify {
+        return WatchOutcome::Ignored;
+    }
+    if let Some(stamp) = last_self_write_at.get(&event.path)
+        && now
+            .checked_duration_since(*stamp)
+            .is_some_and(|elapsed| elapsed < suppress_window)
+    {
+        return WatchOutcome::Suppressed;
+    }
+    let target_index = notes
+        .iter()
+        .position(|note| note.absolute_path == event.path)
+        .or_else(|| {
+            event.path.file_name().and_then(|name| {
+                notes
+                    .iter()
+                    .position(|note| note.absolute_path.file_name() == Some(name))
+            })
+        });
+    match target_index {
+        None => WatchOutcome::UnknownPath,
+        Some(index) if notes[index].dirty => WatchOutcome::Conflict(notes[index].note_id.clone()),
+        Some(index) => WatchOutcome::Reload { index },
+    }
+}
+
 /// needs to drive status updates and the indexer rebuild after the borrow on
 /// `notes` is released.
 #[derive(Debug)]
@@ -2084,5 +2117,129 @@ mod tests {
 
         assert!(sweep.saved.is_empty());
         assert_eq!(fs::read_to_string(&path).expect("read"), "synced\n");
+    }
+
+    fn watch_event(path: PathBuf, kind: super::watcher::WatchKind) -> super::watcher::WatchEvent {
+        super::watcher::WatchEvent { path, kind }
+    }
+
+    #[test]
+    fn watch_clean_note_classified_as_reload() {
+        use std::collections::HashMap;
+
+        use super::{WatchOutcome, classify_watch_event, watcher};
+
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Clean.md");
+        fs::write(&path, "x").expect("seed");
+        let mut record = note_record(path.clone(), "in memory", Instant::now());
+        record.dirty = false;
+        let notes = vec![record];
+
+        let outcome = classify_watch_event(
+            &watch_event(path, watcher::WatchKind::Modify),
+            &notes,
+            &HashMap::new(),
+            Duration::from_millis(200),
+            Instant::now(),
+        );
+        assert_eq!(outcome, WatchOutcome::Reload { index: 0 });
+    }
+
+    #[test]
+    fn watch_dirty_note_classified_as_conflict() {
+        use std::collections::HashMap;
+
+        use super::{WatchOutcome, classify_watch_event, watcher};
+
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Dirty.md");
+        fs::write(&path, "x").expect("seed");
+        let record = note_record(path.clone(), "in memory", Instant::now());
+        let expected = record.note_id.clone();
+        let notes = vec![record];
+
+        let outcome = classify_watch_event(
+            &watch_event(path, watcher::WatchKind::Modify),
+            &notes,
+            &HashMap::new(),
+            Duration::from_millis(200),
+            Instant::now(),
+        );
+        assert_eq!(outcome, WatchOutcome::Conflict(expected));
+    }
+
+    #[test]
+    fn watch_event_within_self_write_window_suppressed() {
+        use std::collections::HashMap;
+
+        use super::{WatchOutcome, classify_watch_event, watcher};
+
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Recent.md");
+        fs::write(&path, "x").expect("seed");
+        let mut record = note_record(path.clone(), "in memory", Instant::now());
+        record.dirty = false;
+        let notes = vec![record];
+
+        let now = Instant::now();
+        let mut self_writes = HashMap::new();
+        self_writes.insert(
+            path.clone(),
+            now.checked_sub(Duration::from_millis(50))
+                .expect("instant has 50ms history"),
+        );
+
+        let outcome = classify_watch_event(
+            &watch_event(path, watcher::WatchKind::Modify),
+            &notes,
+            &self_writes,
+            Duration::from_millis(200),
+            now,
+        );
+        assert_eq!(outcome, WatchOutcome::Suppressed);
+    }
+
+    #[test]
+    fn watch_event_for_unknown_path_classified_as_unknown() {
+        use std::collections::HashMap;
+
+        use super::{WatchOutcome, classify_watch_event, watcher};
+
+        let directory = TempDir::new().expect("tempdir");
+        let known_path = directory.path().join("Known.md");
+        let unknown_path = directory.path().join("Unrelated.md");
+        fs::write(&known_path, "x").expect("seed");
+        let notes = vec![note_record(known_path, "in memory", Instant::now())];
+
+        let outcome = classify_watch_event(
+            &watch_event(unknown_path, watcher::WatchKind::Modify),
+            &notes,
+            &HashMap::new(),
+            Duration::from_millis(200),
+            Instant::now(),
+        );
+        assert_eq!(outcome, WatchOutcome::UnknownPath);
+    }
+
+    #[test]
+    fn watch_other_kind_event_classified_as_ignored() {
+        use std::collections::HashMap;
+
+        use super::{WatchOutcome, classify_watch_event, watcher};
+
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Note.md");
+        fs::write(&path, "x").expect("seed");
+        let notes = vec![note_record(path.clone(), "in memory", Instant::now())];
+
+        let outcome = classify_watch_event(
+            &watch_event(path, watcher::WatchKind::Other),
+            &notes,
+            &HashMap::new(),
+            Duration::from_millis(200),
+            Instant::now(),
+        );
+        assert_eq!(outcome, WatchOutcome::Ignored);
     }
 }
