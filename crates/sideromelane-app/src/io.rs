@@ -70,9 +70,12 @@ pub fn safe_write(path: &Path, source: &str) -> io::Result<()> {
 /// parent-fsync pattern is used. Differs from `safe_write` in two ways:
 ///
 /// 1. Accepts arbitrary bytes rather than a `&str`.
-/// 2. Uses a generic `<filename>.tmp` sibling rather than `.md.tmp`, and skips
-///    the symlink guard since callers write files inside an app-owned data
-///    directory rather than a user-visible notes folder.
+/// 2. Uses a generic `<filename>.tmp` sibling rather than `.md.tmp`.
+///
+/// Like [`safe_write`], this function refuses to write through a symlink.
+/// Even though callers typically target app-owned data directories, those
+/// directories are user-writable and a local process can pre-seed the target
+/// path as a symlink before first launch.
 ///
 /// # Errors
 ///
@@ -83,6 +86,19 @@ pub fn safe_write_bytes(path: &Path, payload: &[u8]) -> io::Result<()> {
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)?;
+    }
+
+    // Guard against writing through a symlink. `~/Library/Application Support`
+    // is user-writable; another local process can pre-seed e.g. `state.json`
+    // as a symlink before first launch.
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to overwrite symlinked path",
+            ));
+        }
+        _ => {}
     }
 
     let file_name = path
@@ -120,7 +136,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::safe_write;
+    use super::{safe_write, safe_write_bytes};
 
     #[test]
     fn second_write_replaces_first() {
@@ -213,6 +229,47 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&target_path).expect("read target"),
             "original",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_write_bytes_refuses_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new().expect("create temp directory");
+        let target_path = directory.path().join("real_state.json");
+        let state_path = directory.path().join("state.json");
+
+        fs::write(&target_path, b"original bytes").expect("write target");
+        symlink(&target_path, &state_path).expect("create symlink");
+
+        let result = safe_write_bytes(&state_path, b"new bytes");
+        assert!(result.is_err(), "expected Err but got Ok");
+        let error = result.expect_err("safe_write_bytes must fail on symlink");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "expected InvalidInput error kind",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to overwrite symlinked path"),
+            "unexpected error message: {error}",
+        );
+
+        // Symlink must still point at the original target.
+        let link_meta = fs::symlink_metadata(&state_path).expect("symlink still exists");
+        assert!(
+            link_meta.file_type().is_symlink(),
+            "state.json must remain a symlink",
+        );
+
+        // Target content must be unchanged.
+        assert_eq!(
+            fs::read(&target_path).expect("read target"),
+            b"original bytes",
         );
     }
 }

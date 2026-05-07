@@ -18,6 +18,8 @@
 use std::ops::Range;
 use std::path::Path;
 
+use sideromelane_core::sanitize_asset_filename;
+
 /// Custom URI scheme used for in-app navigation between notes. The path is a percent-
 /// encoded note name; `egui_commonmark` will surface link clicks via its hyperlink hook.
 pub const NOTE_LINK_SCHEME: &str = "sideromelane://note/";
@@ -117,7 +119,38 @@ fn append_image_embed(inner: &str, folder_root: &Path, out: &mut String) {
     let (target, _anchor, alias) = parse_wiki_link_inner(inner);
     let alt = alias.as_deref().unwrap_or("image");
 
+    // Reject targets that fail filename sanitisation (dot-traversal, bracket
+    // injection, etc.). On rejection preserve the literal embed text so the
+    // note content is not silently dropped.
+    if sanitize_asset_filename(&target).is_err() {
+        out.push_str("![[");
+        out.push_str(inner);
+        out.push_str("]]");
+        return;
+    }
+
     let absolute = folder_root.join("assets").join(&target);
+
+    // Canonicalize-and-prefix-check mirrors the H2 image-drop guard in main.rs.
+    // If `folder_root` doesn't resolve (e.g. the folder was just picked but not
+    // yet created), skip the prefix check and rely on sanitize_asset_filename
+    // alone. If both paths resolve, reject if the target escapes the root.
+    if let Ok(canonical_root) = folder_root.canonicalize() {
+        let canonical_absolute = absolute.canonicalize().unwrap_or_else(|_| {
+            // Asset may not exist yet; canonicalize assets/ and rejoin.
+            folder_root
+                .join("assets")
+                .canonicalize()
+                .map_or_else(|_| absolute.clone(), |base| base.join(&target))
+        });
+        if !canonical_absolute.starts_with(&canonical_root) {
+            out.push_str("![[");
+            out.push_str(inner);
+            out.push_str("]]");
+            return;
+        }
+    }
+
     out.push_str("![");
     out.push_str(alt);
     out.push_str("](file://");
@@ -310,5 +343,40 @@ mod tests {
     fn empty_brackets_are_left_alone() {
         let out = transform_wiki_links("text [[]] more", &root());
         assert_eq!(out, "text [[]] more");
+    }
+
+    #[test]
+    fn image_embed_dot_traversal_is_rendered_inert() {
+        // `../../../etc/passwd` contains `/` which sanitize_asset_filename rejects.
+        let out = transform_wiki_links("![[../../../etc/passwd]]", &root());
+        assert_eq!(out, "![[../../../etc/passwd]]");
+    }
+
+    #[test]
+    fn image_embed_bracket_injected_name_is_rendered_inert() {
+        // `[evil]` contains `[` which sanitize_asset_filename rejects.
+        let out = transform_wiki_links("![[foo[evil].png]]", &root());
+        assert_eq!(out, "![[foo[evil].png]]");
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn image_embed_normal_name_accepted() {
+        use std::fs;
+        use tempfile::TempDir;
+        let dir = TempDir::new().expect("tempdir");
+        // Create the assets/ subdirectory so canonicalize can resolve it.
+        fs::create_dir(dir.path().join("assets")).expect("create assets dir");
+        // With a real directory root the canonicalize check should pass for a
+        // well-formed filename.
+        let out = transform_wiki_links("![[diagram.png]]", dir.path());
+        assert!(
+            out.starts_with("![image](file://"),
+            "expected file:// url, got: {out}",
+        );
+        assert!(
+            out.contains("diagram.png"),
+            "expected filename in url, got: {out}",
+        );
     }
 }
