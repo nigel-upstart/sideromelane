@@ -65,10 +65,18 @@ pub fn sanitize_asset_filename(name: &str) -> Result<String, AssetNameError> {
     }
 
     for character in name.chars() {
-        if matches!(character, '[' | ']' | '\n' | '\r' | '\0' | '/' | '\\') {
+        if matches!(character, '[' | ']' | '\n' | '\r' | '\0' | '/' | '\\' | ':') {
             return Err(AssetNameError::InvalidCharacter);
         }
         if character.is_control() {
+            return Err(AssetNameError::InvalidCharacter);
+        }
+        // Reject Unicode bidi override codepoints (LRE, RLE, PDF, LRO, RLO).
+        if ('\u{202A}'..='\u{202E}').contains(&character) {
+            return Err(AssetNameError::InvalidCharacter);
+        }
+        // Reject Unicode bidi isolate codepoints (LRI, RLI, FSI, PDI).
+        if ('\u{2066}'..='\u{2069}').contains(&character) {
             return Err(AssetNameError::InvalidCharacter);
         }
     }
@@ -205,6 +213,30 @@ mod tests {
     fn rejects_control_chars() {
         assert_eq!(
             sanitize_asset_filename("foo\u{0007}.png"),
+            Err(AssetNameError::InvalidCharacter),
+        );
+    }
+
+    #[test]
+    fn rejects_colon() {
+        assert_eq!(
+            sanitize_asset_filename("file:bad.png"),
+            Err(AssetNameError::InvalidCharacter),
+        );
+    }
+
+    #[test]
+    fn rejects_bidi_override() {
+        assert_eq!(
+            sanitize_asset_filename("photo\u{202E}gnp.exe"),
+            Err(AssetNameError::InvalidCharacter),
+        );
+    }
+
+    #[test]
+    fn rejects_bidi_isolate() {
+        assert_eq!(
+            sanitize_asset_filename("foo\u{2066}.png"),
             Err(AssetNameError::InvalidCharacter),
         );
     }
