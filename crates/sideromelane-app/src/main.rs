@@ -122,6 +122,15 @@ struct FolderState {
     /// for the current folder. Until then the search/backlinks/graph panels
     /// surface a placeholder rather than a misleading empty state.
     indexes_ready: bool,
+    /// Cached file-tree rendering view. Rebuilt lazily in `left_panel` and
+    /// invalidated whenever the underlying note set changes (indexer events,
+    /// `new_note`, image embed inserts).
+    cached_tree: Option<tree::Tree>,
+    /// Transient set of directory paths auto-expanded so the selected note is
+    /// visible. Kept in memory only (never persisted) so reopening the folder
+    /// preserves the user's explicit expand/collapse choices, and dedup'd via
+    /// the set rather than appended every frame.
+    auto_expanded: std::collections::BTreeSet<String>,
 }
 
 impl FolderState {
@@ -146,6 +155,8 @@ impl FolderState {
             folder_index: FolderIndex::default(),
             settings,
             indexes_ready: false,
+            cached_tree: None,
+            auto_expanded: std::collections::BTreeSet::new(),
         })
     }
 
@@ -225,6 +236,7 @@ impl SideromelaneApp {
             dirty: true,
         });
         folder.selected = Some(folder.notes.len() - 1);
+        folder.cached_tree = None;
         let scan_root = folder.root.clone();
         self.active_block_index = None;
         // Adding an unsaved note to disk is deferred to save; still trigger a
@@ -290,6 +302,7 @@ impl SideromelaneApp {
             IndexerEvent::NotesDiscovered(records) => {
                 if let Some(folder) = self.folder.as_mut() {
                     merge_discovered_notes(folder, records);
+                    folder.cached_tree = None;
                 }
             }
             IndexerEvent::IndexUpdated {
@@ -300,6 +313,7 @@ impl SideromelaneApp {
                     folder.search_index = search;
                     folder.folder_index = folder_index;
                     folder.indexes_ready = true;
+                    folder.cached_tree = None;
                 }
             }
         }
@@ -365,7 +379,29 @@ impl SideromelaneApp {
             return;
         }
 
-        let target_path = unique_asset_path(&assets_dir, &safe_name);
+        let Some(target_path) = unique_asset_path(&assets_dir, &safe_name) else {
+            self.status = "Image rejected: too many name collisions in assets/".into();
+            return;
+        };
+
+        let Ok(canonical_root) = folder.root.canonicalize() else {
+            self.status = "Image rejected: target outside folder".into();
+            return;
+        };
+        let Some(canonical_target) = canonicalize_target(&target_path) else {
+            self.status = "Image rejected: target outside folder".into();
+            return;
+        };
+        if !canonical_target.starts_with(&canonical_root) {
+            self.status = "Image rejected: target outside folder".into();
+            return;
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&target_path)
+            && metadata.file_type().is_symlink()
+        {
+            self.status = "Image rejected: target is a symlink".into();
+            return;
+        }
 
         match copy_asset(source_path, &target_path) {
             Ok(()) => {
@@ -383,6 +419,7 @@ impl SideromelaneApp {
                 note.source.push_str("]]\n");
                 note.dirty = true;
                 self.status = format!("Inserted {relative_target}");
+                folder.cached_tree = None;
                 let scan_root = folder.root.clone();
                 self.dispatch_rescan(scan_root);
             }
@@ -396,33 +433,33 @@ impl SideromelaneApp {
             return;
         };
 
-        // Auto-expand the path to the selected note on first render of this folder so
-        // the user lands on a tree where their current note is visible.
+        // Auto-expand ancestors of the selected note into a transient
+        // in-memory set so the user lands on a tree where their current note
+        // is visible, without mutating (and re-persisting) the explicit
+        // `tree_expanded_paths` every frame.
         if let Some(selected_note) = folder
             .selected
             .and_then(|index| folder.notes.get(index))
             .map(|record| record.note_id.clone())
         {
             for ancestor in tree::ancestor_paths(&selected_note) {
-                if !folder
-                    .settings
-                    .ui
-                    .tree_expanded_paths
-                    .iter()
-                    .any(|existing| existing == &ancestor)
-                {
-                    folder.settings.ui.tree_expanded_paths.push(ancestor);
-                }
+                folder.auto_expanded.insert(ancestor);
             }
         }
 
         let mut selected_note = folder.selected;
-        let note_ids: Vec<NoteId> = folder
-            .notes
-            .iter()
-            .map(|record| record.note_id.clone())
-            .collect();
-        let folder_tree = tree::build_tree(&note_ids);
+        // Temporarily move the cached tree out of `folder` so we can pass
+        // `&mut folder` into the render helpers (which need to mutate
+        // `folder.settings.ui.tree_expanded_paths`). The cache is restored
+        // before the function returns. Build on demand if missing.
+        let folder_tree = folder.cached_tree.take().unwrap_or_else(|| {
+            let note_ids: Vec<NoteId> = folder
+                .notes
+                .iter()
+                .map(|record| record.note_id.clone())
+                .collect();
+            tree::build_tree(&note_ids)
+        });
         let mut tree_changed = false;
 
         egui::ScrollArea::vertical()
@@ -436,6 +473,7 @@ impl SideromelaneApp {
                     render_dir(ui, folder, &mut selected_note, subdir, 0, &mut tree_changed);
                 }
             });
+        folder.cached_tree = Some(folder_tree);
 
         if selected_note != folder.selected {
             folder.selected = selected_note;
@@ -962,13 +1000,14 @@ fn render_dir(
     depth: usize,
     tree_changed: &mut bool,
 ) {
-    let expanded_index = folder
+    let explicit_index = folder
         .settings
         .ui
         .tree_expanded_paths
         .iter()
         .position(|path| path == &dir.relative_path);
-    let mut expanded = expanded_index.is_some();
+    let auto_expanded = folder.auto_expanded.contains(&dir.relative_path);
+    let mut expanded = explicit_index.is_some() || auto_expanded;
 
     ui.horizontal(|ui| {
         #[allow(clippy::cast_precision_loss)]
@@ -979,17 +1018,23 @@ fn render_dir(
             .clicked()
         {
             expanded = !expanded;
-            *tree_changed = true;
             if expanded {
-                if expanded_index.is_none() {
+                if explicit_index.is_none() {
                     folder
                         .settings
                         .ui
                         .tree_expanded_paths
                         .push(dir.relative_path.clone());
+                    *tree_changed = true;
                 }
-            } else if let Some(index) = expanded_index {
-                folder.settings.ui.tree_expanded_paths.remove(index);
+            } else {
+                if let Some(index) = explicit_index {
+                    folder.settings.ui.tree_expanded_paths.remove(index);
+                    *tree_changed = true;
+                }
+                // Drop the auto-expand entry too so the next frame doesn't
+                // immediately re-expand the directory the user just collapsed.
+                folder.auto_expanded.remove(&dir.relative_path);
             }
         }
     });
@@ -1135,10 +1180,44 @@ fn is_image_path(path: &Path) -> bool {
         })
 }
 
-fn unique_asset_path(assets_dir: &Path, file_name: &str) -> PathBuf {
+/// Canonicalize `target` for path-traversal checks.
+///
+/// Falls back to canonicalizing the parent directory and rejoining the leaf
+/// name when the target itself does not yet exist (the common case for fresh
+/// asset drops). Returns `None` if neither the target nor its parent can be
+/// canonicalized.
+fn canonicalize_target(target: &Path) -> Option<PathBuf> {
+    if let Ok(path) = target.canonicalize() {
+        return Some(path);
+    }
+    // Walk up until we find an ancestor that exists, canonicalize it, and
+    // rejoin the missing tail. This handles fresh `assets/` directories that
+    // `copy_asset` will create on demand.
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut current = target;
+    loop {
+        if let Ok(canonical) = current.canonicalize() {
+            let mut resolved = canonical;
+            for component in tail.iter().rev() {
+                resolved.push(component);
+            }
+            return Some(resolved);
+        }
+        let file_name = current.file_name()?;
+        tail.push(file_name);
+        current = current.parent()?;
+    }
+}
+
+/// Maximum suffix attempts when resolving a unique asset path. A value this
+/// large is well past anything a human would intentionally create and cheaply
+/// caps a hostile or pathological assets/ directory.
+const UNIQUE_ASSET_MAX_ATTEMPTS: u32 = 1024;
+
+fn unique_asset_path(assets_dir: &Path, file_name: &str) -> Option<PathBuf> {
     let candidate = assets_dir.join(file_name);
     if !candidate.exists() {
-        return candidate;
+        return Some(candidate);
     }
 
     let stem = Path::new(file_name)
@@ -1150,14 +1229,14 @@ fn unique_asset_path(assets_dir: &Path, file_name: &str) -> PathBuf {
         .and_then(|extension| extension.to_str())
         .unwrap_or("png");
 
-    for index in 1.. {
+    for index in 1..=UNIQUE_ASSET_MAX_ATTEMPTS {
         let candidate = assets_dir.join(format!("{stem}-{index}.{extension}"));
         if !candidate.exists() {
-            return candidate;
+            return Some(candidate);
         }
     }
 
-    unreachable!("unbounded loop returns before exhausting usize");
+    None
 }
 
 fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
