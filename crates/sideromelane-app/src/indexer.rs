@@ -308,6 +308,62 @@ mod tests {
     }
 
     #[test]
+    fn note_changed_rediscovers_unknown_note_ids() {
+        use sideromelane_core::SearchQuery;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let existing_path = tempdir.path().join("Existing.md");
+        fs::write(&existing_path, "# existing\n").expect("write existing note");
+
+        let indexer = Indexer::new(egui::Context::default());
+        indexer.send(IndexerCommand::Rescan {
+            root: tempdir.path().to_path_buf(),
+            options: WalkOptions::default(),
+        });
+
+        let _initial = poll_for(&indexer, Duration::from_secs(2), |event| {
+            matches!(event, IndexerEvent::IndexUpdated { .. })
+        })
+        .expect("expected an initial IndexUpdated event");
+
+        // Simulate a fresh save of a brand-new note appearing on disk.
+        let new_path = tempdir.path().join("New.md");
+        fs::write(&new_path, "# new\n").expect("write new note");
+
+        indexer.send(IndexerCommand::NoteChanged {
+            note_id: NoteId::from_folder_relative_path("New.md").expect("note id"),
+            source: "# new\n".to_string(),
+        });
+
+        let event = poll_for(&indexer, Duration::from_secs(2), |event| {
+            matches!(event, IndexerEvent::IndexUpdated { .. })
+        })
+        .expect("expected a follow-up IndexUpdated event");
+
+        match event {
+            IndexerEvent::IndexUpdated { search, folder } => {
+                let new_id = NoteId::from_folder_relative_path("New.md").expect("note id");
+                let has_node = folder
+                    .graph()
+                    .nodes()
+                    .iter()
+                    .any(|node| node.note_id() == &new_id);
+                assert!(
+                    has_node,
+                    "FolderIndex graph should include the rediscovered note"
+                );
+
+                let hits = search.search(&SearchQuery::text("new"));
+                assert!(
+                    !hits.is_empty(),
+                    "search index should return hits for the new note"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn rescan_publishes_scan_failed_for_missing_root() {
         let indexer = Indexer::new(egui::Context::default());
         let bad_root = PathBuf::from("/this/path/does/not/exist/sideromelane");
