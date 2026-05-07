@@ -41,6 +41,12 @@ const HANDLE_PX: f32 = 4.0;
 /// Maximum number of indexer events to drain per frame. Bounded so background bursts
 /// cannot starve UI input handling.
 const MAX_INDEXER_EVENTS_PER_FRAME: usize = 16;
+/// Maximum number of concurrent pending conflict modals. A large external
+/// burst (e.g. `git pull` rewriting many dirty notes at once) would otherwise
+/// spawn one `egui::Window` per note. Above the cap we record the overflow
+/// count and surface it as a single status message in `render_conflict_modals`
+/// so the user knows there are more conflicts queued behind the open ones.
+const MAX_PENDING_CONFLICTS: usize = 32;
 /// Debounce window for persisting [`AppState`]. Coalesces rapid edits (slider
 /// drags, repeated folder opens) into a single atomic save without blocking
 /// the UI on every keystroke.
@@ -112,6 +118,12 @@ struct SideromelaneApp {
     /// dirty. Each entry drives a non-blocking conflict modal until the user
     /// resolves it (Reload from disk / Keep mine).
     pending_conflicts: Vec<NoteId>,
+    /// Count of conflict events dropped because `pending_conflicts` was at
+    /// `MAX_PENDING_CONFLICTS` when they arrived. Surfaced in
+    /// `render_conflict_modals` as a single overflow indicator and reset
+    /// once the user clears every open modal — subsequent watcher events
+    /// then refill `pending_conflicts` normally.
+    pending_conflicts_dropped: usize,
 }
 
 impl SideromelaneApp {
@@ -137,6 +149,7 @@ impl SideromelaneApp {
             last_self_write_at: HashMap::new(),
             watcher: None,
             pending_conflicts: Vec::new(),
+            pending_conflicts_dropped: 0,
         }
     }
 }
@@ -682,7 +695,16 @@ impl SideromelaneApp {
         ) {
             WatchOutcome::Ignored | WatchOutcome::Suppressed | WatchOutcome::UnknownPath => {}
             WatchOutcome::Conflict(note_id) => {
-                if !self.pending_conflicts.contains(&note_id) {
+                if self.pending_conflicts.contains(&note_id) {
+                    // Already queued — no work to do.
+                } else if self.pending_conflicts.len() >= MAX_PENDING_CONFLICTS {
+                    // Cap reached. Track the overflow so the UI can surface a
+                    // "+ N more" indicator instead of spawning an unbounded
+                    // number of windows. The next batch of events refills
+                    // normally once the user clears the open modals.
+                    self.pending_conflicts_dropped =
+                        self.pending_conflicts_dropped.saturating_add(1);
+                } else {
                     self.pending_conflicts.push(note_id);
                 }
             }
@@ -1166,17 +1188,23 @@ impl SideromelaneApp {
     ///   buffer; the next auto-save sweep overwrites the disk version.
     fn render_conflict_modals(&mut self, context: &egui::Context) {
         if self.pending_conflicts.is_empty() {
+            // Once every modal has been resolved, allow the next watcher
+            // burst to refill `pending_conflicts` cleanly by clearing the
+            // overflow counter.
+            self.pending_conflicts_dropped = 0;
             return;
         }
         let Some(folder) = self.folder.as_mut() else {
             // No folder, nothing to reconcile against. Drop conflicts so a
             // pending list does not survive a folder switch.
             self.pending_conflicts.clear();
+            self.pending_conflicts_dropped = 0;
             return;
         };
 
         // Walk a snapshot so we can mutate `pending_conflicts` inside the loop.
         let pending = self.pending_conflicts.clone();
+        let dropped = self.pending_conflicts_dropped;
         let mut resolved: Vec<NoteId> = Vec::new();
         let mut status_update: Option<String> = None;
 
@@ -1208,6 +1236,12 @@ impl SideromelaneApp {
                         "This file was modified outside Sideromelane while \
                          your buffer has unsaved edits.",
                     );
+                    if dropped > 0 {
+                        ui.label(format!(
+                            "+ {dropped} more pending conflicts (resolve open \
+                             ones first)"
+                        ));
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("Reload from disk").clicked() {
                             action = Some(ConflictChoice::Reload);
