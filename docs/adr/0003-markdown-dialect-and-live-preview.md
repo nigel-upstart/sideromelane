@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (implemented in v1 via egui_commonmark — see ADR 0012)
 
 ## Context
 

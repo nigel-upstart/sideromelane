@@ -6,6 +6,7 @@ mod indexer;
 mod io;
 mod outline;
 mod preferences;
+mod preview;
 mod state;
 mod tree;
 
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Sense};
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use sideromelane_core::{
     FolderIndex, FolderSettings, HybridSearchIndex, MarkdownNote, NoteAnalysis, NoteId,
     SearchQuery, WalkOptions, sanitize_asset_filename, validate_image_magic_bytes,
@@ -24,6 +26,7 @@ use sideromelane_core::{
 use crate::indexer::{Indexer, IndexerCommand, IndexerEvent};
 use crate::io::safe_write;
 use crate::preferences::PreferencesWindow;
+use crate::preview::{NOTE_LINK_SCHEME, transform_wiki_links};
 use crate::state::{AppState, StartupMode};
 
 /// Maximum byte size of an image that can be dropped into the assets folder.
@@ -77,6 +80,12 @@ struct SideromelaneApp {
     /// the default folder with a fresh untitled note) inside `update`,
     /// where the egui context is available for any future interactive bits.
     startup_pending: bool,
+    /// Caches `egui_commonmark` rendering state (image fetches, syntax-highlighting state,
+    /// and the link-hooks registry) across frames so per-block renders are stable.
+    commonmark_cache: CommonMarkCache,
+    /// Set when the user clicks a `sideromelane://note/<NAME>` link in a rendered block.
+    /// Drained by `main_panel` after render to navigate to the target note.
+    pending_link_click: Option<String>,
 }
 
 impl SideromelaneApp {
@@ -96,6 +105,8 @@ impl SideromelaneApp {
             preferences_open: false,
             preferences_window: PreferencesWindow::default(),
             startup_pending: true,
+            commonmark_cache: CommonMarkCache::default(),
+            pending_link_click: None,
         }
     }
 }
@@ -833,6 +844,7 @@ impl SideromelaneApp {
         ui.separator();
 
         let word_wrap = folder.settings.ui.editor_word_wrap;
+        let folder_root = folder.root.clone();
         let changed = match self.mode {
             EditorMode::Raw => raw_editor(
                 ui,
@@ -846,6 +858,9 @@ impl SideromelaneApp {
                 &mut self.active_block_index,
                 word_wrap,
                 &mut self.pending_jump,
+                &folder_root,
+                &mut self.commonmark_cache,
+                &mut self.pending_link_click,
             ),
         };
 
@@ -853,6 +868,27 @@ impl SideromelaneApp {
             folder.notes[index].dirty = true;
             // Index refresh is deferred to save; typing must not block on
             // re-indexing every keystroke.
+        }
+
+        // Drain any pending in-app link click. Navigates to the target note if it exists.
+        if let Some(target) = self.pending_link_click.take() {
+            self.navigate_to_note_by_name(&target);
+        }
+    }
+
+    /// Selects the note whose file stem matches `name` (case-sensitive). No-op if the
+    /// folder is unloaded or the name is not found.
+    fn navigate_to_note_by_name(&mut self, name: &str) {
+        // Strip any trailing `#anchor` — anchor support is future work.
+        let stem = name.split('#').next().unwrap_or(name);
+        if let Some(folder) = self.folder.as_mut()
+            && let Some(idx) = folder
+                .notes
+                .iter()
+                .position(|note| note.note_id.file_stem() == stem)
+        {
+            folder.selected = Some(idx);
+            self.active_block_index = None;
         }
     }
 }
@@ -929,12 +965,16 @@ fn raw_editor(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn live_preview_editor(
     ui: &mut egui::Ui,
     note: &mut NoteRecord,
     active_block_index: &mut Option<usize>,
     word_wrap: bool,
     pending_jump: &mut Option<usize>,
+    folder_root: &Path,
+    cache: &mut CommonMarkCache,
+    pending_link_click: &mut Option<String>,
 ) -> bool {
     let blocks = markdown_blocks(&note.source);
 
@@ -949,6 +989,8 @@ fn live_preview_editor(
     let mut changed_block = None;
     let pane_width = ui.available_width();
     let active_block_width = if word_wrap { pane_width } else { f32::INFINITY };
+
+    let note_stem = note.note_id.file_stem().to_owned();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (index, block) in blocks.iter().enumerate() {
@@ -969,7 +1011,32 @@ fn live_preview_editor(
                         changed_block = Some((block.range.clone(), text));
                     }
                 } else {
-                    let response = render_block(ui, block);
+                    // Pre-pass: rewrite wiki links and image embeds to CommonMark.
+                    let transformed = transform_wiki_links(&block.text, folder_root);
+
+                    // Register every in-app link so `egui_commonmark` routes clicks
+                    // through the cache instead of the OS browser.
+                    register_note_links(cache, &transformed);
+
+                    // The viewer needs a stable, unique source id per block to keep
+                    // its scrollable state. Combine the note stem with the block index.
+                    let source_id =
+                        egui::Id::new(("sm-mdblock", &note_stem, index, block.range.start));
+                    let response = ui
+                        .push_id(source_id, |ui| {
+                            CommonMarkViewer::new().show(ui, cache, &transformed);
+                        })
+                        .response
+                        .interact(Sense::click());
+
+                    // Drain any link hooks that activated this frame. The first match
+                    // wins; subsequent clicks queue behind via `pending_link_click`.
+                    if pending_link_click.is_none()
+                        && let Some(url) = take_clicked_note_link(cache)
+                    {
+                        *pending_link_click = Some(url);
+                    }
+
                     if response.clicked() {
                         *active_block_index = Some(index);
                     }
@@ -993,51 +1060,43 @@ fn live_preview_editor(
     }
 }
 
-fn render_block(ui: &mut egui::Ui, block: &MarkdownBlock) -> egui::Response {
-    match block.kind {
-        MarkdownBlockKind::Frontmatter => {
-            ui.vertical(|ui| {
-                for line in block.text.lines().filter(|line| !line.trim().is_empty()) {
-                    if line.trim() != "---" {
-                        ui.monospace(line);
-                    }
-                }
-            })
-            .response
+/// Registers every `sideromelane://note/...` URL appearing in `text` with the cache so
+/// `egui_commonmark` renders them as in-app links rather than OS-browser hyperlinks.
+fn register_note_links(cache: &mut CommonMarkCache, text: &str) {
+    let mut cursor = 0;
+    while let Some(rel) = text[cursor..].find(NOTE_LINK_SCHEME) {
+        let start = cursor + rel;
+        let after = start + NOTE_LINK_SCHEME.len();
+        // The URL ends at the first character disallowed in a Markdown link target.
+        let end = text[after..]
+            .find([')', ' ', '\n', '\r', '\t', '"', '<', '>'])
+            .map_or(text.len(), |rel_end| after + rel_end);
+        let url = &text[start..end];
+        if cache.get_link_hook(url).is_none() {
+            cache.add_link_hook(url);
         }
-        MarkdownBlockKind::Heading(level) => {
-            let text = block.text.trim_start_matches('#').trim();
-            if level == 1 {
-                ui.heading(text)
-            } else {
-                ui.strong(text)
-            }
-        }
-        MarkdownBlockKind::Code | MarkdownBlockKind::Table => ui.add(
-            egui::Label::new(egui::RichText::new(&block.text).monospace()).sense(Sense::click()),
-        ),
-        MarkdownBlockKind::List | MarkdownBlockKind::Paragraph | MarkdownBlockKind::Blank => {
-            ui.add(egui::Label::new(preview_text(&block.text)).sense(Sense::click()))
-        }
+        cursor = end;
     }
+}
+
+/// Returns the first registered note link that was clicked this frame, stripped of its
+/// scheme. Resets the hook so subsequent frames don't re-fire it.
+fn take_clicked_note_link(cache: &mut CommonMarkCache) -> Option<String> {
+    let clicked: Option<String> = cache
+        .link_hooks()
+        .iter()
+        .find_map(|(url, hit)| hit.then(|| url.clone()));
+    clicked.and_then(|url| {
+        // Reset the hook flag so we don't re-trigger next frame.
+        cache.link_hooks_mut().insert(url.clone(), false);
+        url.strip_prefix(NOTE_LINK_SCHEME).map(str::to_owned)
+    })
 }
 
 #[derive(Debug, Clone)]
 struct MarkdownBlock {
     range: std::ops::Range<usize>,
     text: String,
-    kind: MarkdownBlockKind,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum MarkdownBlockKind {
-    Blank,
-    Code,
-    Frontmatter,
-    Heading(u8),
-    List,
-    Paragraph,
-    Table,
 }
 
 fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
@@ -1051,7 +1110,7 @@ fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
     {
         let end_line = frontmatter_end + 1;
         let range = 0..line_ranges[end_line].end;
-        blocks.push(block(source, range, MarkdownBlockKind::Frontmatter));
+        blocks.push(block(source, range));
         end_line + 1
     } else {
         0
@@ -1063,7 +1122,7 @@ fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
         let trimmed = line.trim();
 
         if trimmed.is_empty() {
-            blocks.push(block(source, range, MarkdownBlockKind::Blank));
+            blocks.push(block(source, range));
             index += 1;
         } else if trimmed.starts_with("```") {
             let start = index;
@@ -1081,10 +1140,9 @@ fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
             blocks.push(block(
                 source,
                 line_ranges[start].start..line_ranges[index - 1].end,
-                MarkdownBlockKind::Code,
             ));
-        } else if let Some(level) = heading_level(trimmed) {
-            blocks.push(block(source, range, MarkdownBlockKind::Heading(level)));
+        } else if heading_level(trimmed).is_some() {
+            blocks.push(block(source, range));
             index += 1;
         } else if trimmed.starts_with('|') {
             let start = index;
@@ -1099,7 +1157,6 @@ fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
             blocks.push(block(
                 source,
                 line_ranges[start].start..line_ranges[index - 1].end,
-                MarkdownBlockKind::Table,
             ));
         } else if is_list_line(trimmed) {
             let start = index;
@@ -1112,7 +1169,6 @@ fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
             blocks.push(block(
                 source,
                 line_ranges[start].start..line_ranges[index - 1].end,
-                MarkdownBlockKind::List,
             ));
         } else {
             let start = index;
@@ -1132,23 +1188,21 @@ fn markdown_blocks(source: &str) -> Vec<MarkdownBlock> {
             blocks.push(block(
                 source,
                 line_ranges[start].start..line_ranges[index - 1].end,
-                MarkdownBlockKind::Paragraph,
             ));
         }
     }
 
     if blocks.is_empty() {
-        blocks.push(block(source, 0..source.len(), MarkdownBlockKind::Blank));
+        blocks.push(block(source, 0..source.len()));
     }
 
     blocks
 }
 
-fn block(source: &str, range: std::ops::Range<usize>, kind: MarkdownBlockKind) -> MarkdownBlock {
+fn block(source: &str, range: std::ops::Range<usize>) -> MarkdownBlock {
     MarkdownBlock {
         text: source[range.clone()].to_owned(),
         range,
-        kind,
     }
 }
 
@@ -1179,13 +1233,6 @@ fn heading_level(line: &str) -> Option<u8> {
 
 fn is_list_line(line: &str) -> bool {
     line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ")
-}
-
-fn preview_text(source: &str) -> String {
-    source
-        .replace("- [ ]", "[ ]")
-        .replace("- [x]", "[x]")
-        .replace("- [X]", "[x]")
 }
 
 fn select_note(folder: &mut FolderState, note_id: &NoteId) {
