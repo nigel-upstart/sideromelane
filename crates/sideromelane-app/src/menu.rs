@@ -37,7 +37,6 @@ const RECENT_LABEL_MAX: usize = 64;
 /// Action triggered by a menu click. Mirrors the toolbar / Preferences entry
 /// points the rest of the app already exposes.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Variants are constructed by `AppMenu`; consumers land in the next commit.
 pub enum MenuAction {
     /// Open a folder picker (same as the toolbar "Open Folder" button).
     OpenFolder,
@@ -59,7 +58,6 @@ pub enum MenuAction {
 
 /// macOS-native menu bar plus a `MenuId -> MenuAction` lookup map.
 #[cfg(target_os = "macos")]
-#[allow(dead_code)] // Recent-folder rebuild + event drain land in the next commit.
 pub struct AppMenu {
     /// The root menu installed on `NSApplication`.
     menu: Menu,
@@ -77,7 +75,6 @@ pub struct AppMenu {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(dead_code)] // `rebuild_recent_submenu` / `poll` get wired in the next commit.
 impl AppMenu {
     /// Build the menu and populate the Recent Folders submenu from the current
     /// LRU. Call [`AppMenu::install_for_nsapp`] after `NSApplication` is up
