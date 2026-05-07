@@ -17,14 +17,15 @@ warranted.
 Accept the following limitations for v1 and revisit them when the triggering
 conditions are met.
 
-### Force-directed graph layout is O(n²) and runs on the UI thread
+### Force-directed graph layout is O(n²) and runs on the UI thread (resolved)
 
-`crates/sideromelane-app/src/graph_layout.rs` recomputes the layout on every
-tick using a naive O(n²) force-integration loop. The implementation is
-acceptable up to roughly 500 nodes; above approximately 2,000 nodes the UI
-thread will stall noticeably. A future ADR will move graph layout into the
-background indexer worker if folder sizes warrant the added concurrency
-complexity.
+Resolved in Slice 8 of spec 0002. The hand-rolled `graph_layout.rs` has been
+removed; the graph view is now driven by the published `egui_graphs` crate
+and is scoped to the 1-hop neighborhood of the focused note rather than the
+full folder, so the previous O(n²) full-folder layout cost is no longer on
+the UI's hot path. Any remaining layout cost is internal to `egui_graphs`
+and is its concern, not Sideromelane's. A separate background-layout
+follow-up is no longer warranted.
 
 ### Wiki-link extractor is O(N²) on adversarial inputs
 
