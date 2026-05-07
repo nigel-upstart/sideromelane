@@ -26,23 +26,20 @@ fn strip_emphasis_suffix(s: &str) -> Option<&str> {
 /// surrounding `**`/`*`/`__`/`_` emphasis markers stripped.
 ///
 /// Internal whitespace is left alone. The source note is unchanged — this is
-/// purely a presentation helper.
+/// purely a presentation helper. Walks `&str` slices through every strip step
+/// and only allocates once at the end.
 #[must_use]
 pub fn display_heading_text(raw: &str) -> String {
-    let mut text = raw.trim_start();
-    while let Some(rest) = text.strip_prefix('#') {
-        text = rest;
-    }
-    let mut working = text.trim().to_owned();
+    let mut text = raw.trim_start().trim_start_matches('#').trim();
 
-    while let Some(stripped) = strip_emphasis_prefix(&working) {
-        working = stripped.to_owned();
+    while let Some(stripped) = strip_emphasis_prefix(text) {
+        text = stripped;
     }
-    while let Some(stripped) = strip_emphasis_suffix(&working) {
-        working = stripped.to_owned();
+    while let Some(stripped) = strip_emphasis_suffix(text) {
+        text = stripped;
     }
 
-    working.trim().to_owned()
+    text.trim().to_owned()
 }
 
 /// Returns the outline font size for a Markdown heading level. Heading levels
