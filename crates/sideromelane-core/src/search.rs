@@ -1,4 +1,4 @@
-use crate::{MarkdownNote, MetadataValue, NoteId};
+use crate::{MarkdownNote, MetadataValue, NoteAnalysis, NoteId, merged_tags};
 
 const SEMANTIC_DIMENSIONS: usize = 64;
 const SEMANTIC_DIMENSIONS_U64: u64 = 64;
@@ -355,11 +355,11 @@ impl SearchDocument {
             .frontmatter()
             .and_then(|frontmatter| frontmatter.scalar("title"))
             .map(str::to_owned);
-        let tags = note
-            .frontmatter()
-            .and_then(|frontmatter| frontmatter.list("tags"))
-            .map(<[String]>::to_vec)
-            .unwrap_or_default();
+        let analysis = NoteAnalysis::from_note(note);
+        let tags = merged_tags(note, &analysis)
+            .into_iter()
+            .map(|tag| tag.name().to_owned())
+            .collect();
         let fields = note
             .frontmatter()
             .map(|frontmatter| {

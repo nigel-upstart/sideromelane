@@ -2,7 +2,7 @@
 
 ## Status
 
-**Proposed** — pending the choice described in "Decision" below.
+**Accepted**
 
 ## Context
 

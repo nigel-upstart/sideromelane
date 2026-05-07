@@ -347,7 +347,7 @@ mod tests {
                     .graph()
                     .nodes()
                     .iter()
-                    .any(|node| node.note_id() == &new_id);
+                    .any(|node| node.as_note() == Some(&new_id));
                 assert!(
                     has_node,
                     "FolderIndex graph should include the rediscovered note"

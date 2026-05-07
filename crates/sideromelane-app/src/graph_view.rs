@@ -1,31 +1,34 @@
 //! Graph-view widget rendered via [`egui_graphs`].
 //!
-//! Shows the depth-bounded neighborhood of the currently focused note. The
-//! underlying [`egui_graphs::Graph`] is rebuilt only when the focus or the
+//! Shows the depth-bounded neighborhood of the currently focused note or tag.
+//! The underlying [`egui_graphs::Graph`] is rebuilt only when the focus or the
 //! observed neighborhood signature changes; otherwise the widget reuses the
 //! cached graph so node positions stay stable across frames.
 
 use std::collections::BTreeMap;
 
-use eframe::egui::{self, Pos2};
+use eframe::egui::{self, Color32, Pos2};
 use egui_graphs::{
     DefaultEdgeShape, DefaultNodeShape, FruchtermanReingold, FruchtermanReingoldState, Graph,
     GraphView, LayoutForceDirected, SettingsInteraction, SettingsStyle,
 };
 use petgraph::{Directed, stable_graph::DefaultIx};
-use sideromelane_core::{FolderIndex, Neighborhood, NoteId};
+use sideromelane_core::{FolderIndex, GraphNode, Neighborhood, NoteId};
 
 /// Default hop radius for the focus-scoped graph view.
 pub const DEFAULT_DEPTH: usize = 1;
 
-/// Concrete `egui_graphs` graph type with `NoteId` payloads, force-directed
+/// Fill color used for tag nodes in the graph view (soft purple).
+const TAG_NODE_COLOR: Color32 = Color32::from_rgb(160, 100, 210);
+
+/// Concrete `egui_graphs` graph type with `GraphNode` payloads, force-directed
 /// layout state, and the default node/edge shapes.
-type NoteGraph = Graph<NoteId, (), Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>;
+type NoteGraph = Graph<GraphNode, (), Directed, DefaultIx, DefaultNodeShape, DefaultEdgeShape>;
 
 /// Concrete `egui_graphs` widget that pairs with [`NoteGraph`].
 type NoteGraphView<'a> = GraphView<
     'a,
-    NoteId,
+    GraphNode,
     (),
     Directed,
     DefaultIx,
@@ -46,19 +49,19 @@ pub struct GraphViewState {
     signature: Option<NeighborhoodSignature>,
     /// Last set of selected node indices observed from the widget. Used to
     /// detect a fresh selection (i.e. a click on a node) and surface the
-    /// corresponding `NoteId` to the caller.
+    /// corresponding `GraphNode` to the caller.
     last_selection: Vec<petgraph::stable_graph::NodeIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NeighborhoodSignature {
-    focus: NoteId,
-    nodes: Vec<NoteId>,
-    edges: Vec<(NoteId, NoteId)>,
+    focus: GraphNode,
+    nodes: Vec<GraphNode>,
+    edges: Vec<(GraphNode, GraphNode)>,
 }
 
 impl NeighborhoodSignature {
-    fn new(focus: &NoteId, neighborhood: &Neighborhood) -> Self {
+    fn new(focus: &GraphNode, neighborhood: &Neighborhood) -> Self {
         let mut nodes = neighborhood.nodes.clone();
         nodes.sort();
         let mut edges = neighborhood.edges.clone();
@@ -71,8 +74,8 @@ impl NeighborhoodSignature {
     }
 }
 
-/// Paints the focus-scoped graph view into `ui` and returns the note id that
-/// was clicked, if any.
+/// Paints the focus-scoped graph view into `ui` and returns the node that was
+/// clicked, if any (note or tag).
 ///
 /// `depth` is the hop radius used to compute the neighborhood. When `focus` is
 /// `None` the view renders an empty placeholder.
@@ -80,9 +83,9 @@ pub fn draw(
     ui: &mut egui::Ui,
     state: &mut GraphViewState,
     folder_index: &FolderIndex,
-    focus: Option<&NoteId>,
+    focus: Option<&GraphNode>,
     depth: usize,
-) -> Option<NoteId> {
+) -> Option<GraphNode> {
     let Some(focus) = focus else {
         ui.centered_and_justified(|ui| {
             ui.label("Select a note to view its graph");
@@ -113,32 +116,36 @@ pub fn draw(
         );
     ui.add(&mut widget);
 
-    detect_clicked_note(graph, &mut state.last_selection)
+    detect_clicked_node(graph, &mut state.last_selection)
 }
 
-/// Builds an [`egui_graphs::Graph`] from the supplied neighborhood. Layout is
-/// not seeded — the force-directed simulation produces positions on first
-/// draw and they persist via the cache.
-fn build_graph(focus: &NoteId, neighborhood: &Neighborhood) -> NoteGraph {
+/// Builds an [`egui_graphs::Graph`] from the supplied neighborhood.
+///
+/// Note nodes use the default (blue) fill; tag nodes use a soft purple and the
+/// label is prefixed with `#`. The focus node is seeded at the origin.
+fn build_graph(focus: &GraphNode, neighborhood: &Neighborhood) -> NoteGraph {
     let mut graph = NoteGraph::new(petgraph::stable_graph::StableGraph::default());
     let mut indices = BTreeMap::new();
 
-    for note_id in &neighborhood.nodes {
-        // Seed each node near the origin so the simulation starts from a
-        // small cluster and expands; the focus stays at (0, 0) as a hint.
-        let location = if note_id == focus {
+    for node in &neighborhood.nodes {
+        let location = if node == focus {
             Pos2::ZERO
         } else {
-            // Spread initial positions slightly so the algorithm has a
-            // gradient to work against on the first step.
             Pos2::new(0.0, 0.0)
         };
-        let idx = graph.add_node_with_label_and_location(
-            note_id.clone(),
-            note_id.file_stem().to_owned(),
-            location,
-        );
-        indices.insert(note_id.clone(), idx);
+
+        let label = node_label(node);
+        let is_tag = matches!(node, GraphNode::Tag { .. });
+        let node_clone = node.clone();
+
+        let idx = graph.add_node_custom(node_clone, |n| {
+            n.set_label(label);
+            n.set_location(location);
+            if is_tag {
+                n.set_color(TAG_NODE_COLOR);
+            }
+        });
+        indices.insert(node.clone(), idx);
     }
 
     for (source, target) in &neighborhood.edges {
@@ -150,13 +157,18 @@ fn build_graph(focus: &NoteId, neighborhood: &Neighborhood) -> NoteGraph {
     graph
 }
 
-/// Returns the `NoteId` of a node that became newly selected this frame, if
-/// any. Selecting the same node again (or clearing the selection) returns
-/// `None`.
-fn detect_clicked_note(
+fn node_label(node: &GraphNode) -> String {
+    match node {
+        GraphNode::Note { note_id } => note_id.file_stem().to_owned(),
+        GraphNode::Tag { tag } => format!("#{}", tag.name()),
+    }
+}
+
+/// Returns the `GraphNode` of a node that became newly selected this frame, if any.
+fn detect_clicked_node(
     graph: &NoteGraph,
     last_selection: &mut Vec<petgraph::stable_graph::NodeIndex>,
-) -> Option<NoteId> {
+) -> Option<GraphNode> {
     let current = graph.selected_nodes();
     let newly_selected = current
         .iter()
@@ -167,4 +179,13 @@ fn detect_clicked_note(
     last_selection.extend_from_slice(current);
 
     newly_selected.and_then(|idx| graph.node(idx).map(|node| node.payload().clone()))
+}
+
+/// Returns a `GraphNode::Note` wrapping `note_id`.
+///
+/// Convenience for callers that track focus as a `NoteId`.
+pub fn note_focus(note_id: &NoteId) -> GraphNode {
+    GraphNode::Note {
+        note_id: note_id.clone(),
+    }
 }

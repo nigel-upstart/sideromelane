@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::{MarkdownNote, NoteAnalysis, NoteId};
+use crate::note::Tag;
+use crate::{MarkdownNote, NoteAnalysis, NoteId, merged_tags};
 
 /// In-memory derived index for a set of parsed folder notes.
 ///
@@ -19,6 +20,8 @@ pub struct FolderIndex {
     backlinks: BTreeMap<NoteId, Vec<Backlink>>,
     /// Stems that map to more than one note. These are excluded from graph/backlink resolution.
     ambiguous_targets: BTreeMap<String, Vec<NoteId>>,
+    /// Maps each tag to the notes that use it (frontmatter or inline).
+    tag_index: BTreeMap<Tag, Vec<NoteId>>,
 }
 
 impl FolderIndex {
@@ -34,31 +37,45 @@ impl FolderIndex {
             .map(|note| {
                 let note_id = note.note_id().clone();
                 let analysis = NoteAnalysis::from_note(&note);
-                (note_id, analysis)
+                (note_id, note, analysis)
             })
             .collect::<Vec<_>>();
 
         analyzed_notes.sort_by(|left, right| left.0.cmp(&right.0));
 
-        let (stem_to_note_id, ambiguous_targets) = unique_stem_lookup(&analyzed_notes);
-        let nodes = analyzed_notes
+        let note_id_analysis: Vec<(NoteId, NoteAnalysis)> = analyzed_notes
             .iter()
-            .map(|(note_id, _analysis)| GraphNode {
+            .map(|(id, _, analysis)| (id.clone(), analysis.clone()))
+            .collect();
+
+        let (stem_to_note_id, ambiguous_targets) = unique_stem_lookup(&note_id_analysis);
+
+        // Build note nodes.
+        let mut nodes: Vec<GraphNode> = analyzed_notes
+            .iter()
+            .map(|(note_id, _, _)| GraphNode::Note {
                 note_id: note_id.clone(),
             })
-            .collect::<Vec<_>>();
+            .collect();
+
         let mut edges = Vec::new();
         let mut backlinks: BTreeMap<NoteId, Vec<Backlink>> = BTreeMap::new();
+        let mut tag_index: BTreeMap<Tag, Vec<NoteId>> = BTreeMap::new();
 
-        for (source, analysis) in &analyzed_notes {
+        for (source, note, analysis) in &analyzed_notes {
+            // Wiki-link edges (note → note).
             for link in analysis.wiki_links() {
                 let Some(target) = stem_to_note_id.get(link.target()) else {
                     continue;
                 };
 
                 let edge = GraphEdge {
-                    source: source.clone(),
-                    target: target.clone(),
+                    source: GraphNode::Note {
+                        note_id: source.clone(),
+                    },
+                    target: GraphNode::Note {
+                        note_id: target.clone(),
+                    },
                 };
                 let backlink = Backlink {
                     source: source.clone(),
@@ -68,12 +85,36 @@ impl FolderIndex {
                 backlinks.entry(target.clone()).or_default().push(backlink);
                 edges.push(edge);
             }
+
+            // Tag edges (note → tag) and tag_index.
+            for tag in merged_tags(note, analysis) {
+                tag_index
+                    .entry(tag.clone())
+                    .or_default()
+                    .push(source.clone());
+
+                edges.push(GraphEdge {
+                    source: GraphNode::Note {
+                        note_id: source.clone(),
+                    },
+                    target: GraphNode::Tag { tag },
+                });
+            }
         }
+
+        // Add tag nodes (one per unique tag).
+        for tag in tag_index.keys() {
+            nodes.push(GraphNode::Tag { tag: tag.clone() });
+        }
+
+        // Prune empty tag_index entries (shouldn't occur, but be defensive).
+        tag_index.retain(|_, notes| !notes.is_empty());
 
         Self {
             graph: Graph { nodes, edges },
             backlinks,
             ambiguous_targets,
+            tag_index,
         }
     }
 
@@ -96,27 +137,31 @@ impl FolderIndex {
         &self.ambiguous_targets
     }
 
+    /// Returns a map from each tag to the notes that use it.
+    ///
+    /// Tags with zero notes are not present (pruned during construction).
+    #[must_use]
+    pub const fn tag_index(&self) -> &BTreeMap<Tag, Vec<NoteId>> {
+        &self.tag_index
+    }
+
     /// Returns the depth-bounded neighborhood of `focus`.
     ///
-    /// BFS from `focus` over both forward links (edges where source == current)
-    /// and backlinks (edges where target == current), expanding up to `depth`
-    /// hops. The returned [`Neighborhood`] contains every node reachable within
-    /// `depth` hops together with all directed edges between any two nodes in
-    /// the result set — including self-loops on `focus`.
+    /// BFS from `focus` over both forward edges and reverse edges, expanding up
+    /// to `depth` hops. The returned [`Neighborhood`] contains every node
+    /// reachable within `depth` hops together with all directed edges between
+    /// any two nodes in the result set — including self-loops on `focus`.
     ///
     /// `depth == 0` yields just the focus node and any self-loops on it. An
     /// unknown `focus` (not present in this index) still returns a singleton
     /// neighborhood containing only `focus` so callers can render an isolated
     /// node without special-casing missing IDs.
     #[must_use]
-    pub fn neighborhood(&self, focus: &NoteId, depth: usize) -> Neighborhood {
-        // BFS frontier expansion. We index edges by source/target on demand;
-        // graph sizes here are small and rebuilds happen on user navigation,
-        // not per frame, so the linear scan is fine.
-        let mut visited: BTreeSet<NoteId> = BTreeSet::new();
+    pub fn neighborhood(&self, focus: &GraphNode, depth: usize) -> Neighborhood {
+        let mut visited: BTreeSet<GraphNode> = BTreeSet::new();
         visited.insert(focus.clone());
 
-        let mut queue: VecDeque<(NoteId, usize)> = VecDeque::new();
+        let mut queue: VecDeque<(GraphNode, usize)> = VecDeque::new();
         queue.push_back((focus.clone(), 0));
 
         while let Some((current, current_depth)) = queue.pop_front() {
@@ -140,7 +185,7 @@ impl FolderIndex {
             }
         }
 
-        let edges: Vec<(NoteId, NoteId)> = self
+        let edges: Vec<(GraphNode, GraphNode)> = self
             .graph
             .edges
             .iter()
@@ -155,19 +200,19 @@ impl FolderIndex {
     }
 }
 
-/// Depth-bounded view of [`FolderIndex`] centered on a single note.
+/// Depth-bounded view of [`FolderIndex`] centered on a single node.
 ///
 /// See [`FolderIndex::neighborhood`] for traversal semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Neighborhood {
-    /// Notes within the requested hop distance, deduplicated and sorted.
-    pub nodes: Vec<NoteId>,
-    /// Directed edges (`source` → `target`) between any two notes in
+    /// Notes and tags within the requested hop distance, deduplicated and sorted.
+    pub nodes: Vec<GraphNode>,
+    /// Directed edges (`source` → `target`) between any two nodes in
     /// [`Neighborhood::nodes`], including self-loops.
-    pub edges: Vec<(NoteId, NoteId)>,
+    pub edges: Vec<(GraphNode, GraphNode)>,
 }
 
-/// Directed graph of note links.
+/// Directed graph of note links and tag associations.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Graph {
     nodes: Vec<GraphNode>,
@@ -175,7 +220,7 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// Returns graph nodes in deterministic note path order.
+    /// Returns graph nodes in deterministic order (notes first, then tags).
     #[must_use]
     pub fn nodes(&self) -> &[GraphNode] {
         &self.nodes
@@ -188,37 +233,61 @@ impl Graph {
     }
 }
 
-/// Graph node representing a note.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphNode {
-    note_id: NoteId,
+/// A node in the folder graph — either a note or a tag.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GraphNode {
+    /// A note node, identified by its [`NoteId`].
+    Note {
+        /// The note identifier.
+        note_id: NoteId,
+    },
+    /// A tag node, identified by its [`Tag`].
+    Tag {
+        /// The tag value.
+        tag: Tag,
+    },
 }
 
 impl GraphNode {
-    /// Returns the note represented by this graph node.
+    /// Returns the [`NoteId`] if this is a note node.
     #[must_use]
-    pub const fn note_id(&self) -> &NoteId {
-        &self.note_id
+    pub const fn as_note(&self) -> Option<&NoteId> {
+        match self {
+            Self::Note { note_id } => Some(note_id),
+            Self::Tag { .. } => None,
+        }
+    }
+
+    /// Returns the [`Tag`] if this is a tag node.
+    #[must_use]
+    pub const fn as_tag(&self) -> Option<&Tag> {
+        match self {
+            Self::Note { .. } => None,
+            Self::Tag { tag } => Some(tag),
+        }
     }
 }
 
-/// Directed graph edge from a source note to a target note.
+/// Directed graph edge from a source node to a target node.
+///
+/// In practice, the source is always a note and the target is either a note
+/// (wiki-link edge) or a tag (tag-association edge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphEdge {
-    source: NoteId,
-    target: NoteId,
+    source: GraphNode,
+    target: GraphNode,
 }
 
 impl GraphEdge {
-    /// Returns the source note.
+    /// Returns the source node.
     #[must_use]
-    pub const fn source(&self) -> &NoteId {
+    pub const fn source(&self) -> &GraphNode {
         &self.source
     }
 
-    /// Returns the target note.
+    /// Returns the target node.
     #[must_use]
-    pub const fn target(&self) -> &NoteId {
+    pub const fn target(&self) -> &GraphNode {
         &self.target
     }
 }

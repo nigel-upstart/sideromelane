@@ -91,6 +91,9 @@ struct SideromelaneApp {
     status: String,
     indexer: Option<Indexer>,
     graph_view: graph_view::GraphViewState,
+    /// Independent graph focus (note or tag). `None` means the graph tracks
+    /// the currently selected note. Set when the user clicks a tag node.
+    graph_focus: Option<sideromelane_core::GraphNode>,
     app_state: AppState,
     app_state_dirty: bool,
     last_state_save: Instant,
@@ -151,6 +154,7 @@ impl SideromelaneApp {
             status: String::new(),
             indexer: None,
             graph_view: graph_view::GraphViewState::default(),
+            graph_focus: None,
             app_state,
             app_state_dirty: false,
             last_state_save: Instant::now(),
@@ -966,6 +970,7 @@ impl SideromelaneApp {
         if selected_note != folder.selected {
             folder.selected = selected_note;
             self.active_block_index = None;
+            self.graph_focus = None;
         }
 
         let pending_settings_save = if tree_changed {
@@ -1030,6 +1035,7 @@ impl SideromelaneApp {
                         {
                             folder.selected = Some(index);
                             self.active_block_index = None;
+                            self.graph_focus = None;
                         }
                     }
                 }
@@ -1099,6 +1105,7 @@ impl SideromelaneApp {
                 if ui.button(source.file_stem()).clicked() {
                     select_note(folder, &source);
                     self.active_block_index = None;
+                    self.graph_focus = None;
                 }
             }
         }
@@ -1194,19 +1201,27 @@ impl SideromelaneApp {
                 &mut self.pending_link_click,
             ),
             EditorMode::Graph => {
-                let focus = folder.notes[index].note_id.clone();
+                let default_focus = graph_view::note_focus(&folder.notes[index].note_id);
+                let focus = self.graph_focus.as_ref().unwrap_or(&default_focus);
                 let clicked = graph_view::draw(
                     ui,
                     &mut self.graph_view,
                     &folder.folder_index,
-                    Some(&focus),
+                    Some(focus),
                     graph_view::DEFAULT_DEPTH,
                 );
-                if let Some(note_id) = clicked
-                    && note_id != focus
-                {
-                    select_note(folder, &note_id);
-                    self.active_block_index = None;
+                match clicked {
+                    Some(sideromelane_core::GraphNode::Note { ref note_id })
+                        if note_id != &folder.notes[index].note_id =>
+                    {
+                        select_note(folder, note_id);
+                        self.active_block_index = None;
+                        self.graph_focus = None;
+                    }
+                    Some(tag_node @ sideromelane_core::GraphNode::Tag { .. }) => {
+                        self.graph_focus = Some(tag_node);
+                    }
+                    _ => {}
                 }
                 false
             }
