@@ -651,13 +651,18 @@ impl SideromelaneApp {
     /// silently ignored — the indexer rescan triggered after a save handles
     /// any structural divergence.
     fn drain_watcher_events(&mut self) {
-        let Some(watcher) = self.watcher.as_ref() else {
+        if self.watcher.is_none() {
             return;
-        };
-        // Collect first so we can drop the immutable `watcher` borrow before
-        // mutating `self.folder` / `pending_conflicts`.
-        let events: Vec<watcher::WatchEvent> = std::iter::from_fn(|| watcher.poll()).collect();
-        for event in events {
+        }
+        // Cap per-frame work so a sudden burst (e.g. `git pull` rewriting
+        // hundreds of notes) cannot starve UI input handling. Each `Reload`
+        // does a synchronous `read_to_string` on the UI thread, so we
+        // deliberately prefer responsiveness over draining the whole burst
+        // in one frame; remaining events get picked up on subsequent frames.
+        for _ in 0..MAX_INDEXER_EVENTS_PER_FRAME {
+            let Some(event) = self.watcher.as_ref().and_then(watcher::Watcher::poll) else {
+                break;
+            };
             self.apply_watch_event(&event);
         }
     }
