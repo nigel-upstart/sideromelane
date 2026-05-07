@@ -3,6 +3,7 @@
 mod graph_view;
 mod indexer;
 mod io;
+mod menu;
 mod outline;
 mod preferences;
 mod preview;
@@ -24,6 +25,7 @@ use sideromelane_core::{
 
 use crate::indexer::{Indexer, IndexerCommand, IndexerEvent};
 use crate::io::safe_write;
+use crate::menu::{AppMenu, MenuAction};
 use crate::preferences::PreferencesWindow;
 use crate::preview::{NOTE_LINK_SCHEME, transform_wiki_links};
 use crate::state::{AppState, StartupMode};
@@ -87,6 +89,10 @@ struct SideromelaneApp {
     /// Set when the user clicks a `sideromelane://note/<NAME>` link in a rendered block.
     /// Drained by `main_panel` after render to navigate to the target note.
     pending_link_click: Option<String>,
+    /// Native macOS menu bar. Initialized lazily on the first frame because
+    /// `muda` needs `NSApplication` to be running before
+    /// `Menu::init_for_nsapp` can attach.
+    app_menu: Option<AppMenu>,
 }
 
 impl SideromelaneApp {
@@ -108,6 +114,7 @@ impl SideromelaneApp {
             startup_pending: true,
             commonmark_cache: CommonMarkCache::default(),
             pending_link_click: None,
+            app_menu: None,
         }
     }
 }
@@ -117,10 +124,17 @@ impl eframe::App for SideromelaneApp {
         if self.indexer.is_none() {
             self.indexer = Some(Indexer::new(ui.ctx().clone()));
         }
+        if self.app_menu.is_none() {
+            // First frame: NSApplication is up, attach the menu now.
+            let menu = AppMenu::new(&self.app_state.recent_folders);
+            menu.install_for_nsapp();
+            self.app_menu = Some(menu);
+        }
         if self.startup_pending {
             self.startup_pending = false;
             self.run_startup();
         }
+        self.drain_menu_events();
         self.drain_indexer_events();
         self.handle_dropped_files(ui.ctx());
 
@@ -317,6 +331,9 @@ impl SideromelaneApp {
                 self.app_state_dirty = true;
                 self.folder = Some(folder);
                 self.active_block_index = None;
+                if let Some(menu) = self.app_menu.as_mut() {
+                    menu.rebuild_recent_submenu(&self.app_state.recent_folders);
+                }
                 self.dispatch_rescan(scan_root);
             }
             Err(error) => self.status = format!("Open failed: {error}"),
@@ -434,6 +451,66 @@ impl SideromelaneApp {
             }
             Err(error) => self.status = format!("Save failed: {error}"),
         }
+    }
+
+    /// Drain pending menu events and dispatch each one. Bounded per frame
+    /// for the same reason `drain_indexer_events` is bounded — a hostile or
+    /// pathological burst must not starve UI input handling.
+    fn drain_menu_events(&mut self) {
+        for _ in 0..MAX_INDEXER_EVENTS_PER_FRAME {
+            let Some(action) = self.app_menu.as_ref().and_then(AppMenu::poll) else {
+                break;
+            };
+            self.dispatch_menu_action(action);
+        }
+    }
+
+    fn dispatch_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::OpenFolder => self.pick_folder(),
+            MenuAction::NewNote => self.new_note(),
+            MenuAction::Save => self.save_selected(),
+            MenuAction::Close => self.close_active_note(),
+            MenuAction::ToggleGraph => self.toggle_graph_mode(),
+            MenuAction::ToggleWordWrap => self.toggle_word_wrap(),
+            MenuAction::ShowPreferences => self.show_preferences(),
+            MenuAction::OpenRecent(path) => self.open_folder(path),
+        }
+    }
+
+    /// Spec 0002 AC-3: "Close (⌘W) — closes the active note tab (no-op if
+    /// not yet implemented)." Tabs aren't here yet; surface the no-op in the
+    /// status bar so the shortcut doesn't feel broken.
+    fn close_active_note(&mut self) {
+        self.status = "Close: tabs not yet implemented".into();
+    }
+
+    /// Toggle Graph mode. When already in Graph, drop back to Raw so the
+    /// shortcut acts as a true toggle rather than locking the user in.
+    fn toggle_graph_mode(&mut self) {
+        self.mode = if self.mode == EditorMode::Graph {
+            EditorMode::Raw
+        } else {
+            EditorMode::Graph
+        };
+    }
+
+    /// Toggle the per-folder editor word-wrap setting and persist it. Mirrors
+    /// the right-panel checkbox: the setting is folder-scoped and triggers a
+    /// settings save, but does not require a rescan since walker behavior is
+    /// unchanged.
+    fn toggle_word_wrap(&mut self) {
+        let Some(folder) = self.folder.as_mut() else {
+            return;
+        };
+        folder.settings.ui.editor_word_wrap = !folder.settings.ui.editor_word_wrap;
+        if let Err(error) = folder.settings.save(&folder.root) {
+            self.status = format!("Settings save failed: {error}");
+        }
+    }
+
+    const fn show_preferences(&mut self) {
+        self.preferences_open = true;
     }
 
     fn dispatch_rescan(&mut self, root: PathBuf) {
