@@ -7,9 +7,6 @@
 //! rather than holding a draft buffer: edits are inexpensive, the schema is
 //! flat, and the debounced save loop coalesces rapid changes.
 
-// Wired into the boot path in a follow-up commit.
-#![allow(dead_code)]
-
 use eframe::egui;
 
 use crate::state::{AppState, StartupMode};

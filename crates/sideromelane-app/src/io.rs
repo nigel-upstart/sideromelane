@@ -65,9 +65,6 @@ pub fn safe_write(path: &Path, source: &str) -> io::Result<()> {
 
 /// Write `payload` to `path` atomically.
 ///
-/// Wired into the boot path in a follow-up commit; declared `pub` so the
-/// state module can use it without going through the test harness.
-///
 /// Sibling to [`safe_write`] for non-Markdown writers (app-local state,
 /// preferences, etc.). The same temp-file + `sync_data` + rename + best-effort
 /// parent-fsync pattern is used. Differs from `safe_write` in two ways:
@@ -81,8 +78,6 @@ pub fn safe_write(path: &Path, source: &str) -> io::Result<()> {
 ///
 /// Returns the first IO error encountered while creating directories, writing,
 /// fsyncing, or renaming.
-#[allow(dead_code)] // Used by `state::AppState::save`; the call site is
-// added in a follow-up commit.
 pub fn safe_write_bytes(path: &Path, payload: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()

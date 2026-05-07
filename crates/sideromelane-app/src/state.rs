@@ -7,10 +7,6 @@
 //! rejected so a downgrade cannot silently drop or corrupt fields the
 //! older binary does not understand.
 
-// `state` is wired into the boot path in a follow-up commit. Until then the
-// load/save surface lives only behind unit tests.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::fs;
 use std::io;
@@ -255,7 +251,9 @@ impl AppState {
     }
 
     /// Update the in-memory `left_pane_split_ratio`, clamping to the
-    /// supported range.
+    /// supported range. Consumed by the splitter widget in slice 4 of spec
+    /// 0002; until then the field round-trips through load/save only.
+    #[allow(dead_code)]
     pub const fn set_left_pane_split_ratio(&mut self, ratio: f32) {
         self.left_pane_split_ratio =
             ratio.clamp(MIN_LEFT_PANE_SPLIT_RATIO, MAX_LEFT_PANE_SPLIT_RATIO);
