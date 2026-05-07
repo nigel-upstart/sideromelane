@@ -144,16 +144,15 @@ fn build_graph(focus: &GraphNode, neighborhood: &Neighborhood) -> NoteGraph {
         } else {
             let i = non_focus.iter().position(|n| *n == node).unwrap_or(0);
             // Node counts never exceed a few thousand; precision loss is negligible.
-            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_precision_loss)]
             let angle = 2.0_f32 * std::f32::consts::PI * i as f32 / count as f32;
             Pos2::new(150.0 * angle.cos(), 150.0 * angle.sin())
         };
 
         let label = node_label(node);
         let is_tag = matches!(node, GraphNode::Tag { .. });
-        let node_clone = node.clone();
 
-        let idx = graph.add_node_custom(node_clone, |n| {
+        let idx = graph.add_node_custom(node.clone(), |n| {
             n.set_label(label);
             n.set_location(location);
             if is_tag {
