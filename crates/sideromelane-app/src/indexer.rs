@@ -12,6 +12,7 @@
 //! against whatever indexes the app currently holds. They start empty, then
 //! become eventually consistent as `IndexUpdated` events arrive.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -189,10 +190,29 @@ fn worker_loop(
                     record.source = source;
                 } else if let Some((root, options)) = last_walk.as_ref() {
                     // Brand-new note that the indexer has not seen yet.
-                    // Re-discover so the fresh save shows up in subsequent indexes.
+                    // Re-discover so the fresh save shows up in subsequent indexes,
+                    // but merge against the existing in-memory set so unsaved
+                    // edits to other notes survive the rediscovery.
                     match discover_notes(root, options) {
-                        Ok(records) => {
-                            current_notes = records;
+                        Ok(fresh) => {
+                            let mut existing: HashMap<NoteId, NoteRecord> =
+                                std::mem::take(&mut current_notes)
+                                    .into_iter()
+                                    .map(|record| (record.note_id.clone(), record))
+                                    .collect();
+                            let mut merged: Vec<NoteRecord> = Vec::with_capacity(fresh.len());
+                            for fresh_record in fresh {
+                                if let Some(mut prior) = existing.remove(&fresh_record.note_id) {
+                                    // In-memory edits win for `source`, but pick up any
+                                    // path change (e.g. rename) from the fresh discovery.
+                                    prior.absolute_path = fresh_record.absolute_path;
+                                    merged.push(prior);
+                                } else {
+                                    merged.push(fresh_record);
+                                }
+                            }
+                            // Anything left in `existing` was not seen on disk and is dropped.
+                            current_notes = merged;
                             if let Some(record) = current_notes
                                 .iter_mut()
                                 .find(|record| record.note_id == note_id)
@@ -262,4 +282,121 @@ fn build_indexes(notes: &[NoteRecord]) -> (HybridSearchIndex, FolderIndex) {
     let search = HybridSearchIndex::from_notes(parsed.clone());
     let folder = FolderIndex::from_notes(parsed);
     (search, folder)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn poll_for<F>(indexer: &Indexer, timeout: Duration, mut predicate: F) -> Option<IndexerEvent>
+    where
+        F: FnMut(&IndexerEvent) -> bool,
+    {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Some(event) = indexer.poll() {
+                if predicate(&event) {
+                    return Some(event);
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn note_changed_rediscovers_unknown_note_ids() {
+        use sideromelane_core::SearchQuery;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let existing_path = tempdir.path().join("Existing.md");
+        fs::write(&existing_path, "# existing\n").expect("write existing note");
+
+        let indexer = Indexer::new(egui::Context::default());
+        indexer.send(IndexerCommand::Rescan {
+            root: tempdir.path().to_path_buf(),
+            options: WalkOptions::default(),
+        });
+
+        let _initial = poll_for(&indexer, Duration::from_secs(2), |event| {
+            matches!(event, IndexerEvent::IndexUpdated { .. })
+        })
+        .expect("expected an initial IndexUpdated event");
+
+        // Simulate a fresh save of a brand-new note appearing on disk.
+        let new_path = tempdir.path().join("New.md");
+        fs::write(&new_path, "# new\n").expect("write new note");
+
+        indexer.send(IndexerCommand::NoteChanged {
+            note_id: NoteId::from_folder_relative_path("New.md").expect("note id"),
+            source: "# new\n".to_string(),
+        });
+
+        let event = poll_for(&indexer, Duration::from_secs(2), |event| {
+            matches!(event, IndexerEvent::IndexUpdated { .. })
+        })
+        .expect("expected a follow-up IndexUpdated event");
+
+        match event {
+            IndexerEvent::IndexUpdated { search, folder } => {
+                let new_id = NoteId::from_folder_relative_path("New.md").expect("note id");
+                let has_node = folder
+                    .graph()
+                    .nodes()
+                    .iter()
+                    .any(|node| node.note_id() == &new_id);
+                assert!(
+                    has_node,
+                    "FolderIndex graph should include the rediscovered note"
+                );
+
+                let hits = search.search(&SearchQuery::text("new"));
+                assert!(
+                    !hits.is_empty(),
+                    "search index should return hits for the new note"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drop_joins_worker_thread_without_hanging() {
+        let indexer = Indexer::new(egui::Context::default());
+        let start = Instant::now();
+        drop(indexer);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "drop should not hang"
+        );
+    }
+
+    #[test]
+    fn rescan_publishes_scan_failed_for_missing_root() {
+        let indexer = Indexer::new(egui::Context::default());
+        let bad_root = PathBuf::from("/this/path/does/not/exist/sideromelane");
+        indexer.send(IndexerCommand::Rescan {
+            root: bad_root.clone(),
+            options: WalkOptions::default(),
+        });
+
+        let event = poll_for(&indexer, Duration::from_secs(2), |event| {
+            matches!(event, IndexerEvent::ScanFailed { .. })
+        })
+        .expect("expected a ScanFailed event within 2 seconds");
+
+        match event {
+            IndexerEvent::ScanFailed { root, message } => {
+                assert_eq!(root, bad_root);
+                assert!(
+                    !message.is_empty(),
+                    "ScanFailed message should not be empty"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
 }
