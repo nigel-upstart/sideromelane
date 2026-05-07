@@ -283,3 +283,53 @@ fn build_indexes(notes: &[NoteRecord]) -> (HybridSearchIndex, FolderIndex) {
     let folder = FolderIndex::from_notes(parsed);
     (search, folder)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn poll_for<F>(indexer: &Indexer, timeout: Duration, mut predicate: F) -> Option<IndexerEvent>
+    where
+        F: FnMut(&IndexerEvent) -> bool,
+    {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Some(event) = indexer.poll() {
+                if predicate(&event) {
+                    return Some(event);
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn rescan_publishes_scan_failed_for_missing_root() {
+        let indexer = Indexer::new(egui::Context::default());
+        let bad_root = PathBuf::from("/this/path/does/not/exist/sideromelane");
+        indexer.send(IndexerCommand::Rescan {
+            root: bad_root.clone(),
+            options: WalkOptions::default(),
+        });
+
+        let event = poll_for(&indexer, Duration::from_secs(2), |event| {
+            matches!(event, IndexerEvent::ScanFailed { .. })
+        })
+        .expect("expected a ScanFailed event within 2 seconds");
+
+        match event {
+            IndexerEvent::ScanFailed { root, message } => {
+                assert_eq!(root, bad_root);
+                assert!(
+                    !message.is_empty(),
+                    "ScanFailed message should not be empty"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+}
