@@ -325,6 +325,12 @@ fn non_code_ranges(body: &str) -> Vec<std::ops::Range<usize>> {
 pub fn extract_inline_tags(body: &str) -> Vec<Tag> {
     use std::collections::BTreeSet;
 
+    // Guard against pathological backtick patterns (O(M^1.5) worst case in
+    // non_code_ranges). Notes over 512 KiB are skipped rather than stalling.
+    if body.len() > 512 * 1024 {
+        return Vec::new();
+    }
+
     let body_bytes = body.as_bytes();
     let mut seen = BTreeSet::new();
     let mut result = Vec::new();
@@ -686,5 +692,23 @@ mod tests {
         // The whole span is code; #tag inside should be skipped.
         let tags = extract_inline_tags("`foo```#skipped` #real");
         assert_eq!(tags, vec![tag("real")]);
+    }
+
+    #[test]
+    fn tag_after_tab() {
+        let tags = extract_inline_tags("\t#foo");
+        assert_eq!(tags, vec![tag("foo")]);
+    }
+
+    #[test]
+    fn strips_trailing_question_mark_double_quote_single_quote() {
+        assert_eq!(extract_inline_tags("#tag?"), vec![tag("tag")]);
+        assert_eq!(extract_inline_tags("#tag\""), vec![tag("tag")]);
+        assert_eq!(extract_inline_tags("#tag'"), vec![tag("tag")]);
+    }
+
+    #[test]
+    fn tag_new_accepts_all_numeric() {
+        assert!(Tag::new("42").is_ok());
     }
 }

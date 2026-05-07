@@ -801,6 +801,16 @@ impl SideromelaneApp {
                     folder.indexes_ready = true;
                     folder.cached_tree = None;
                 }
+                let stale = if let (Some(sideromelane_core::GraphNode::Tag { tag }), Some(folder)) =
+                    (&self.graph_focus, &self.folder)
+                {
+                    !folder.folder_index.tag_index().contains_key(tag)
+                } else {
+                    false
+                };
+                if stale {
+                    self.graph_focus = None;
+                }
             }
         }
     }

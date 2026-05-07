@@ -181,3 +181,26 @@ fn merged_tags_with_only_inline_tags_returns_those_tags() {
     let names: Vec<&str> = tags.iter().map(Tag::name).collect();
     assert_eq!(names, ["celery", "datadog"]);
 }
+
+#[test]
+fn merged_tags_with_only_frontmatter_tags() {
+    let note_id = NoteId::from_folder_relative_path("notes/FM.md").unwrap();
+    let note = MarkdownNote::parse(
+        note_id,
+        "---\ntitle: Frontmatter Only\ntags: [alpha, beta]\n---\n\nNo inline tags here.\n",
+    );
+    let analysis = NoteAnalysis::from_note(&note);
+    let tags = merged_tags(&note, &analysis);
+    let names: Vec<&str> = tags.iter().map(Tag::name).collect();
+    assert_eq!(names, ["alpha", "beta"]);
+}
+
+#[test]
+fn merged_tags_with_no_frontmatter_returns_inline_tags() {
+    let note_id = NoteId::from_folder_relative_path("notes/Body.md").unwrap();
+    let note = MarkdownNote::parse(note_id, "No frontmatter at all. See #rust.\n");
+    let analysis = NoteAnalysis::from_note(&note);
+    let tags = merged_tags(&note, &analysis);
+    let names: Vec<&str> = tags.iter().map(Tag::name).collect();
+    assert_eq!(names, ["rust"]);
+}

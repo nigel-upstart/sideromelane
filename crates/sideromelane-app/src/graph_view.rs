@@ -223,4 +223,11 @@ mod tests {
         let result = detect_clicked_node(&graph, &mut vec![]);
         assert!(result.is_none());
     }
+
+    #[test]
+    fn node_label_returns_file_stem_for_note_node() {
+        let note_id = NoteId::from_folder_relative_path("work/My Note.md").unwrap();
+        let label = node_label(&GraphNode::Note { note_id });
+        assert_eq!(label, "My Note");
+    }
 }
