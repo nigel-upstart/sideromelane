@@ -601,6 +601,14 @@ impl SideromelaneApp {
         if let Some((relative, error)) = outcome.first_error {
             self.status = format!("Auto-save failed for {relative}: {error}");
         }
+
+        // Prune stale entries so the suppression map can't grow unbounded
+        // over a long session. The 4x factor leaves a comfortable margin
+        // past the suppression window (any entry older than that is no
+        // longer doing real work) while bounding memory by roughly the
+        // save rate over a 4 * SELF_WRITE_SUPPRESS_WINDOW (~800 ms) span.
+        self.last_self_write_at
+            .retain(|_, stamp| stamp.elapsed() < SELF_WRITE_SUPPRESS_WINDOW * 4);
     }
 
     fn dispatch_rescan(&mut self, root: PathBuf) {
