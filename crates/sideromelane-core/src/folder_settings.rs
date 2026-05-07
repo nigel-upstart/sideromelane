@@ -291,6 +291,56 @@ mod tests {
     }
 
     #[test]
+    fn ui_defaults_are_word_wrap_on_and_no_expanded_paths() {
+        let dir = TempDir::new().expect("tempdir");
+        let settings = FolderSettings::load(dir.path()).expect("load default");
+        assert!(settings.ui.editor_word_wrap, "word-wrap default must be on");
+        assert!(settings.ui.tree_expanded_paths.is_empty());
+    }
+
+    #[test]
+    fn ui_settings_round_trip_through_save_and_load() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut settings = FolderSettings::default();
+        settings.ui.editor_word_wrap = false;
+        settings.ui.tree_expanded_paths.push("Cloud".into());
+        settings.ui.tree_expanded_paths.push("Cloud/Q4".into());
+
+        settings.save(dir.path()).expect("save ok");
+        let loaded = FolderSettings::load(dir.path()).expect("load ok");
+
+        assert!(!loaded.ui.editor_word_wrap);
+        assert_eq!(
+            loaded.ui.tree_expanded_paths,
+            vec!["Cloud".to_string(), "Cloud/Q4".to_string()]
+        );
+    }
+
+    #[test]
+    fn legacy_settings_without_ui_key_load_with_defaults() {
+        // A v1 settings file written before `ui` existed must still load.
+        let dir = TempDir::new().expect("tempdir");
+        let metadata_dir = dir.path().join(FOLDER_METADATA_DIR);
+        std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
+        let raw = json!({
+            "version": 1,
+            "ignore": {
+                "honor_gitignore": false,
+                "include_dotfiles": false
+            }
+        });
+        std::fs::write(
+            metadata_dir.join(FOLDER_SETTINGS_FILE),
+            serde_json::to_vec_pretty(&raw).expect("serialize"),
+        )
+        .expect("write");
+
+        let loaded = FolderSettings::load(dir.path()).expect("load legacy");
+        assert!(loaded.ui.editor_word_wrap);
+        assert!(loaded.ui.tree_expanded_paths.is_empty());
+    }
+
+    #[test]
     fn save_creates_metadata_dir() {
         let dir = TempDir::new().expect("tempdir");
         let settings = FolderSettings::default();
