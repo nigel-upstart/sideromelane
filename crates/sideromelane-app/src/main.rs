@@ -10,6 +10,7 @@ mod state;
 mod tree;
 mod watcher;
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io as std_io;
 use std::io::Read;
@@ -40,6 +41,12 @@ const MAX_INDEXER_EVENTS_PER_FRAME: usize = 16;
 /// drags, repeated folder opens) into a single atomic save without blocking
 /// the UI on every keystroke.
 const APP_STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
+/// Window after a successful self-initiated `safe_write` during which any
+/// watcher event for the same path is treated as our own write and ignored.
+/// See ADR 0013. Consumed by the conflict-detection commit later in this
+/// slice; tracked here so the constant lives next to its peers.
+#[allow(dead_code)]
+const SELF_WRITE_SUPPRESS_WINDOW: Duration = Duration::from_millis(200);
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -86,6 +93,12 @@ struct SideromelaneApp {
     /// Set when the user clicks a `sideromelane://note/<NAME>` link in a rendered block.
     /// Drained by `main_panel` after render to navigate to the target note.
     pending_link_click: Option<String>,
+    /// Records the wall-clock instant of the last self-initiated `safe_write`
+    /// per absolute path. Watcher events arriving inside
+    /// [`SELF_WRITE_SUPPRESS_WINDOW`] of one of these timestamps are dropped
+    /// so auto-save's own writes do not trigger external-change conflict
+    /// detection. See ADR 0013.
+    last_self_write_at: HashMap<PathBuf, Instant>,
 }
 
 impl SideromelaneApp {
@@ -107,6 +120,7 @@ impl SideromelaneApp {
             startup_pending: true,
             commonmark_cache: CommonMarkCache::default(),
             pending_link_click: None,
+            last_self_write_at: HashMap::new(),
         }
     }
 }
@@ -122,6 +136,7 @@ impl eframe::App for SideromelaneApp {
         }
         self.drain_indexer_events();
         self.handle_dropped_files(ui.ctx());
+        self.auto_save_tick();
 
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
@@ -273,6 +288,9 @@ struct NoteRecord {
     absolute_path: PathBuf,
     source: String,
     dirty: bool,
+    /// Last time the user (or a programmatic edit) mutated `source`. Used by
+    /// the auto-save tick to skip notes the user is still actively editing.
+    last_edit_at: Instant,
 }
 
 impl NoteRecord {
@@ -290,6 +308,7 @@ impl NoteRecord {
             absolute_path,
             source,
             dirty: false,
+            last_edit_at: Instant::now(),
         })
     }
 }
@@ -401,6 +420,7 @@ impl SideromelaneApp {
             absolute_path,
             source,
             dirty: true,
+            last_edit_at: Instant::now(),
         });
         folder.selected = Some(folder.notes.len() - 1);
         folder.cached_tree = None;
@@ -425,13 +445,49 @@ impl SideromelaneApp {
                 note.dirty = false;
                 let note_id = note.note_id.clone();
                 let source = note.source.clone();
+                let absolute_path = note.absolute_path.clone();
                 let relative = note.note_id.relative_path().display().to_string();
                 self.status = format!("Saved {relative}");
+                self.last_self_write_at
+                    .insert(absolute_path, Instant::now());
                 if let Some(indexer) = self.indexer.as_ref() {
                     indexer.send(IndexerCommand::NoteChanged { note_id, source });
                 }
             }
             Err(error) => self.status = format!("Save failed: {error}"),
+        }
+    }
+
+    /// Walk dirty notes and persist any whose last edit is older than the
+    /// configured auto-save debounce. Errors are surfaced in the status bar
+    /// without clearing `dirty`, so the next tick retries.
+    fn auto_save_tick(&mut self) {
+        let Some(folder) = self.folder.as_mut() else {
+            return;
+        };
+        let debounce =
+            Duration::from_secs(u64::from(self.app_state.auto_save_debounce_secs.max(1)));
+        let now = Instant::now();
+        let outcome = auto_save_dirty_notes(&mut folder.notes, debounce, now);
+        for AutoSaveOutcome {
+            note_id,
+            source,
+            absolute_path,
+            relative,
+        } in &outcome.saved
+        {
+            self.last_self_write_at
+                .insert(absolute_path.clone(), Instant::now());
+            self.status = format!("Auto-saved {relative}");
+            if let Some(indexer) = self.indexer.as_ref() {
+                indexer.send(IndexerCommand::NoteChanged {
+                    note_id: note_id.clone(),
+                    source: source.clone(),
+                });
+            }
+        }
+        if let Some((relative, error)) = outcome.first_error {
+            self.status = format!("Auto-save failed for {relative}: {error}");
         }
     }
 
@@ -585,6 +641,7 @@ impl SideromelaneApp {
                 note.source.push_str(&relative_target);
                 note.source.push_str("]]\n");
                 note.dirty = true;
+                note.last_edit_at = Instant::now();
                 self.status = format!("Inserted {relative_target}");
                 folder.cached_tree = None;
                 let scan_root = folder.root.clone();
@@ -870,9 +927,12 @@ impl SideromelaneApp {
         };
 
         if changed {
-            folder.notes[index].dirty = true;
-            // Index refresh is deferred to save; typing must not block on
-            // re-indexing every keystroke.
+            let note = &mut folder.notes[index];
+            note.dirty = true;
+            // Stamp the edit so the auto-save tick waits for inactivity
+            // before persisting. Index refresh is deferred to save; typing
+            // must not block on re-indexing every keystroke.
+            note.last_edit_at = Instant::now();
         }
 
         // Drain any pending in-app link click. Navigates to the target note if it exists.
@@ -1419,6 +1479,7 @@ fn merge_discovered_notes(folder: &mut FolderState, discovered: Vec<indexer::Not
                 absolute_path: record.absolute_path,
                 source: record.source,
                 dirty: false,
+                last_edit_at: Instant::now(),
             });
         }
     }
@@ -1433,6 +1494,69 @@ fn merge_discovered_notes(folder: &mut FolderState, discovered: Vec<indexer::Not
         folder.selected = Some(0);
     }
     folder.notes = merged;
+}
+
+/// One successfully auto-saved note. Owns clones of the fields the caller
+/// needs to drive status updates and the indexer rebuild after the borrow on
+/// `notes` is released.
+#[derive(Debug)]
+struct AutoSaveOutcome {
+    note_id: NoteId,
+    source: String,
+    absolute_path: PathBuf,
+    relative: String,
+}
+
+/// Aggregated result of one auto-save sweep. `first_error` carries the first
+/// `safe_write` failure encountered so the UI can surface it; subsequent
+/// errors are not collected because they would all share the same status
+/// slot anyway.
+#[derive(Debug, Default)]
+struct AutoSaveSweep {
+    saved: Vec<AutoSaveOutcome>,
+    first_error: Option<(String, std_io::Error)>,
+}
+
+/// Pure-ish auto-save iteration helper. Walks `notes`, calls `safe_write`
+/// on each one whose last edit is older than `debounce`, clears `dirty`
+/// on success, and returns the per-note outcomes for the caller to thread
+/// through the indexer and status bar without holding a `&mut FolderState`.
+///
+/// `now` is taken as a parameter so tests can simulate a debounce timeout
+/// without `std::thread::sleep`.
+fn auto_save_dirty_notes(
+    notes: &mut [NoteRecord],
+    debounce: Duration,
+    now: Instant,
+) -> AutoSaveSweep {
+    let mut sweep = AutoSaveSweep::default();
+    for note in notes.iter_mut() {
+        if !note.dirty {
+            continue;
+        }
+        if now.saturating_duration_since(note.last_edit_at) < debounce {
+            continue;
+        }
+        match safe_write(&note.absolute_path, &note.source) {
+            Ok(()) => {
+                note.dirty = false;
+                let relative = note.note_id.relative_path().display().to_string();
+                sweep.saved.push(AutoSaveOutcome {
+                    note_id: note.note_id.clone(),
+                    source: note.source.clone(),
+                    absolute_path: note.absolute_path.clone(),
+                    relative,
+                });
+            }
+            Err(error) => {
+                if sweep.first_error.is_none() {
+                    let relative = note.note_id.relative_path().display().to_string();
+                    sweep.first_error = Some((relative, error));
+                }
+            }
+        }
+    }
+    sweep
 }
 
 fn next_untitled_note(root: &Path) -> (NoteId, PathBuf) {
@@ -1530,4 +1654,101 @@ fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
     }
 
     fs::copy(source_path, target_path).map(|_bytes| ())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use sideromelane_core::NoteId;
+    use tempfile::TempDir;
+
+    use super::{NoteRecord, auto_save_dirty_notes};
+
+    fn note_record(absolute_path: PathBuf, source: &str, last_edit_at: Instant) -> NoteRecord {
+        let parent = absolute_path
+            .parent()
+            .expect("absolute path has parent")
+            .to_path_buf();
+        let relative = absolute_path
+            .strip_prefix(&parent)
+            .expect("strip prefix")
+            .to_path_buf();
+        let note_id = NoteId::from_folder_relative_path(relative).expect("note id");
+        NoteRecord {
+            note_id,
+            absolute_path,
+            source: source.to_owned(),
+            dirty: true,
+            last_edit_at,
+        }
+    }
+
+    #[test]
+    fn auto_save_tick_writes_dirty_after_debounce() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Note.md");
+        // Pre-existing on-disk content so the auto-save replaces (not just creates).
+        fs::write(&path, "stale\n").expect("seed file");
+
+        let now = Instant::now();
+        let last_edit_at = now
+            .checked_sub(Duration::from_secs(6))
+            .expect("instant has six-second history");
+        let mut notes = vec![note_record(path.clone(), "fresh body", last_edit_at)];
+
+        let sweep = auto_save_dirty_notes(&mut notes, Duration::from_secs(5), now);
+
+        assert_eq!(sweep.saved.len(), 1, "expected one note to be auto-saved");
+        assert!(sweep.first_error.is_none());
+        assert!(!notes[0].dirty, "dirty flag should be cleared on success");
+        assert_eq!(fs::read_to_string(&path).expect("read note"), "fresh body",);
+    }
+
+    #[test]
+    fn auto_save_tick_skips_recently_edited_notes() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Recent.md");
+        fs::write(&path, "previous\n").expect("seed file");
+
+        let now = Instant::now();
+        // Edited 1 s ago, debounce is 5 s — must not save yet.
+        let last_edit_at = now
+            .checked_sub(Duration::from_secs(1))
+            .expect("instant has one-second history");
+        let mut notes = vec![note_record(path.clone(), "in progress", last_edit_at)];
+
+        let sweep = auto_save_dirty_notes(&mut notes, Duration::from_secs(5), now);
+
+        assert!(sweep.saved.is_empty(), "should not save mid-edit notes");
+        assert!(notes[0].dirty, "dirty flag should still be set");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read note"),
+            "previous\n",
+            "on-disk content must remain untouched",
+        );
+    }
+
+    #[test]
+    fn auto_save_tick_ignores_clean_notes() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("Clean.md");
+        fs::write(&path, "synced\n").expect("seed file");
+
+        let now = Instant::now();
+        let last_edit_at = now
+            .checked_sub(Duration::from_mins(1))
+            .expect("instant has one-minute history");
+        let mut record = note_record(path.clone(), "in memory", last_edit_at);
+        record.dirty = false;
+        let mut notes = vec![record];
+
+        let sweep = auto_save_dirty_notes(&mut notes, Duration::from_secs(5), now);
+
+        assert!(sweep.saved.is_empty());
+        assert_eq!(fs::read_to_string(&path).expect("read"), "synced\n");
+    }
 }
