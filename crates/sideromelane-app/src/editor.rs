@@ -151,6 +151,33 @@ struct PopupKeys {
     up: bool,
 }
 
+/// Consume popup-navigation keys from `InputState` before `TextEdit` processes
+/// them. Returns a snapshot of which keys were pressed. When the popup is
+/// empty, returns the default (all false) without touching the event queue.
+fn collect_popup_keys(ui: &egui::Ui, popup: &WikiLinkPopup) -> PopupKeys {
+    if popup.is_empty() {
+        return PopupKeys::default();
+    }
+    ui.input_mut(|i| {
+        let keys = PopupKeys {
+            enter: i.key_pressed(egui::Key::Enter),
+            escape: i.key_pressed(egui::Key::Escape),
+            down: i.key_pressed(egui::Key::ArrowDown),
+            up: i.key_pressed(egui::Key::ArrowUp),
+        };
+        i.events.retain(|e| match e {
+            egui::Event::Key {
+                key, pressed: true, ..
+            } => !matches!(
+                key,
+                egui::Key::Enter | egui::Key::Escape | egui::Key::ArrowDown | egui::Key::ArrowUp
+            ),
+            _ => true,
+        });
+        keys
+    })
+}
+
 /// Register the precomputed `link_targets` from a cached preview with the
 /// `CommonMark` cache. Replaces the old per-frame `register_note_links`
 /// scan over the rendered text — the targets are already memoised in
@@ -190,34 +217,7 @@ pub fn raw_editor(
 ) -> bool {
     let line_count = note.source.lines().count().max(1);
     let mut changed = false;
-
-    // Consume popup-navigation keys before TextEdit processes them so that
-    // Enter doesn't insert a newline and arrow keys don't move the text cursor.
-    let keys = if popup.is_empty() {
-        PopupKeys::default()
-    } else {
-        ui.input_mut(|i| {
-            let keys = PopupKeys {
-                enter: i.key_pressed(egui::Key::Enter),
-                escape: i.key_pressed(egui::Key::Escape),
-                down: i.key_pressed(egui::Key::ArrowDown),
-                up: i.key_pressed(egui::Key::ArrowUp),
-            };
-            i.events.retain(|e| match e {
-                egui::Event::Key {
-                    key, pressed: true, ..
-                } => !matches!(
-                    key,
-                    egui::Key::Enter
-                        | egui::Key::Escape
-                        | egui::Key::ArrowDown
-                        | egui::Key::ArrowUp
-                ),
-                _ => true,
-            });
-            keys
-        })
-    };
+    let keys = collect_popup_keys(ui, popup);
 
     if word_wrap {
         egui::ScrollArea::vertical()
@@ -322,7 +322,7 @@ fn raw_popup_pass(
         }
         return;
     }
-    if let Some(WikiLinkAction::Selected(stem)) = popup.show(ui, &output.response) {
+    if let Some(WikiLinkAction::Selected(stem)) = popup.show(&output.response) {
         apply_wiki_completion(ui, source, output.response.id, cursor_byte, &stem);
         *changed = true;
         popup.set_items(vec![]);
@@ -418,31 +418,7 @@ pub fn live_preview_editor(
                 if is_active {
                     let mut text = block.text.clone();
 
-                    let keys = if popup.is_empty() {
-                        PopupKeys::default()
-                    } else {
-                        ui.input_mut(|i| {
-                            let keys = PopupKeys {
-                                enter: i.key_pressed(egui::Key::Enter),
-                                escape: i.key_pressed(egui::Key::Escape),
-                                down: i.key_pressed(egui::Key::ArrowDown),
-                                up: i.key_pressed(egui::Key::ArrowUp),
-                            };
-                            i.events.retain(|e| match e {
-                                egui::Event::Key {
-                                    key, pressed: true, ..
-                                } => !matches!(
-                                    key,
-                                    egui::Key::Enter
-                                        | egui::Key::Escape
-                                        | egui::Key::ArrowDown
-                                        | egui::Key::ArrowUp
-                                ),
-                                _ => true,
-                            });
-                            keys
-                        })
-                    };
+                    let keys = collect_popup_keys(ui, popup);
 
                     let mut layouter = nowrap_layouter();
                     let widget = egui::TextEdit::multiline(&mut text)

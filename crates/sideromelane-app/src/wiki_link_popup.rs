@@ -6,13 +6,11 @@
 
 use eframe::egui;
 
-/// Action returned by [`WikiLinkPopup::show`] when the user commits or dismisses.
+/// Action returned by [`WikiLinkPopup::show`] when the user clicks a row.
 #[derive(Debug, PartialEq, Eq)]
 pub enum WikiLinkAction {
-    /// User confirmed the given note stem (Enter or click).
+    /// User clicked the given note stem.
     Selected(String),
-    /// User pressed Escape to cancel.
-    Dismissed,
 }
 
 /// Persistent autocomplete popup state. Owned by the editor.
@@ -56,38 +54,12 @@ impl WikiLinkPopup {
 
     /// Render the popup anchored below `anchor_response`.
     ///
-    /// Handles arrow-key navigation, Enter to confirm, and Escape to dismiss.
-    /// Returns [`WikiLinkAction::Selected`] or [`WikiLinkAction::Dismissed`] when
-    /// the user takes an action, `None` otherwise.
-    pub(crate) fn show(
-        &mut self,
-        ui: &egui::Ui,
-        anchor_response: &egui::Response,
-    ) -> Option<WikiLinkAction> {
+    /// Handles only click selection — keyboard navigation (Enter/Escape/arrows)
+    /// is consumed by the caller before `TextEdit` processes them and is applied
+    /// via `raw_popup_pass`.
+    /// Returns [`WikiLinkAction::Selected`] on click, `None` otherwise.
+    pub(crate) fn show(&self, anchor_response: &egui::Response) -> Option<WikiLinkAction> {
         let popup_id = anchor_response.id.with("wlp");
-
-        let (escape, enter, down, up) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::Escape),
-                i.key_pressed(egui::Key::Enter),
-                i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::ArrowUp),
-            )
-        });
-
-        if escape {
-            return Some(WikiLinkAction::Dismissed);
-        }
-        if down {
-            self.select_next();
-        }
-        if up {
-            self.select_prev();
-        }
-        if enter && let Some(stem) = self.selected_item() {
-            return Some(WikiLinkAction::Selected(stem.to_owned()));
-        }
-
         let mut clicked: Option<WikiLinkAction> = None;
         egui::Popup::from_response(anchor_response)
             .open(true)
@@ -104,7 +76,6 @@ impl WikiLinkPopup {
                     }
                 }
             });
-
         clicked
     }
 }
