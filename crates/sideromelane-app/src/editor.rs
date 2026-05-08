@@ -88,6 +88,28 @@ fn extract_note_link_targets(text: &str) -> Vec<String> {
     targets
 }
 
+#[allow(dead_code)]
+fn find_wiki_link_prefix(source: &str, cursor_byte: usize) -> Option<&str> {
+    let before_cursor = source.get(..cursor_byte)?;
+    let open_pos = before_cursor.rfind("[[")?;
+    let after_open = &before_cursor[open_pos + 2..];
+    if after_open.contains("]]") {
+        return None;
+    }
+    Some(after_open)
+}
+
+#[allow(dead_code)]
+fn complete_note_links<'a>(stems: &[&'a str], prefix: &str) -> Vec<&'a str> {
+    let lower = prefix.to_lowercase();
+    stems
+        .iter()
+        .filter(|s| s.to_lowercase().contains(&lower))
+        .copied()
+        .take(10)
+        .collect()
+}
+
 /// Register the precomputed `link_targets` from a cached preview with the
 /// `CommonMark` cache. Replaces the old per-frame `register_note_links`
 /// scan over the rendered text — the targets are already memoised in
@@ -499,8 +521,9 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        BlockPreviewCache, CachedBlockPreview, extract_note_link_targets,
-        get_or_insert_cached_preview, hash_block_text, sweep_stale_block_previews,
+        BlockPreviewCache, CachedBlockPreview, complete_note_links, extract_note_link_targets,
+        find_wiki_link_prefix, get_or_insert_cached_preview, hash_block_text,
+        sweep_stale_block_previews,
     };
 
     #[test]
@@ -596,5 +619,77 @@ mod tests {
                 "sideromelane://note/B".to_owned(),
             ]
         );
+    }
+
+    // ── find_wiki_link_prefix ─────────────────────────────────────────────
+
+    #[test]
+    fn wiki_prefix_returns_prefix_when_cursor_inside_open_link() {
+        assert_eq!(find_wiki_link_prefix("[[Foo", 5), Some("Foo"));
+    }
+
+    #[test]
+    fn wiki_prefix_returns_empty_string_at_bare_open_bracket() {
+        assert_eq!(find_wiki_link_prefix("[[", 2), Some(""));
+    }
+
+    #[test]
+    fn wiki_prefix_returns_none_when_link_already_closed() {
+        assert_eq!(find_wiki_link_prefix("[[Foo]]", 7), None);
+    }
+
+    #[test]
+    fn wiki_prefix_returns_prefix_for_second_open_link() {
+        // [[Done]] [[Bar — cursor at end, second link is open
+        let src = "[[Done]] [[Bar";
+        assert_eq!(find_wiki_link_prefix(src, src.len()), Some("Bar"));
+    }
+
+    #[test]
+    fn wiki_prefix_returns_none_when_cursor_before_open_bracket() {
+        // cursor is at byte 0, before any `[[`
+        assert_eq!(find_wiki_link_prefix("[[Foo", 0), None);
+    }
+
+    #[test]
+    fn wiki_prefix_returns_none_for_plain_text() {
+        let src = "no wiki links here";
+        assert_eq!(find_wiki_link_prefix(src, src.len()), None);
+    }
+
+    #[test]
+    fn wiki_prefix_mid_prefix() {
+        // "text [[Fo" — cursor mid-way through the prefix
+        let src = "text [[Fo";
+        assert_eq!(find_wiki_link_prefix(src, src.len()), Some("Fo"));
+    }
+
+    // ── complete_note_links ───────────────────────────────────────────────
+
+    #[test]
+    fn complete_links_returns_case_insensitive_substring_matches() {
+        let stems = ["Alpha", "alpha-two", "Beta", "Alphabet"];
+        assert_eq!(
+            complete_note_links(&stems, "alpha"),
+            vec!["Alpha", "alpha-two", "Alphabet"]
+        );
+    }
+
+    #[test]
+    fn complete_links_empty_prefix_returns_all_up_to_cap() {
+        let stems: Vec<&str> = (0..15).map(|_| "Note").collect();
+        assert_eq!(complete_note_links(&stems, "").len(), 10);
+    }
+
+    #[test]
+    fn complete_links_returns_empty_when_no_match() {
+        let stems = ["Alpha", "Beta"];
+        assert!(complete_note_links(&stems, "Gamma").is_empty());
+    }
+
+    #[test]
+    fn complete_links_is_case_insensitive() {
+        let stems = ["MyNote"];
+        assert_eq!(complete_note_links(&stems, "mynote"), vec!["MyNote"]);
     }
 }
