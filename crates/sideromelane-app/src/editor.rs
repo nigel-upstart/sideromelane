@@ -10,9 +10,11 @@ use std::path::Path;
 
 use eframe::egui::{self, Sense};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use sideromelane_core::FolderIndex;
 
 use crate::NoteRecord;
 use crate::preview::{NOTE_LINK_SCHEME, transform_wiki_links};
+use crate::wiki_link_popup::{WikiLinkAction, WikiLinkPopup};
 
 /// Cached output of the per-block live-preview pre-pass. `transformed` is the
 /// `CommonMark`-shaped text that gets fed to `egui_commonmark`; `link_targets`
@@ -88,7 +90,6 @@ fn extract_note_link_targets(text: &str) -> Vec<String> {
     targets
 }
 
-#[allow(dead_code)]
 fn find_wiki_link_prefix(source: &str, cursor_byte: usize) -> Option<&str> {
     let before_cursor = source.get(..cursor_byte)?;
     let open_pos = before_cursor.rfind("[[")?;
@@ -99,7 +100,6 @@ fn find_wiki_link_prefix(source: &str, cursor_byte: usize) -> Option<&str> {
     Some(after_open)
 }
 
-#[allow(dead_code)]
 fn complete_note_links<'a>(stems: &[&'a str], prefix: &str) -> Vec<&'a str> {
     let lower = prefix.to_lowercase();
     stems
@@ -108,6 +108,47 @@ fn complete_note_links<'a>(stems: &[&'a str], prefix: &str) -> Vec<&'a str> {
         .copied()
         .take(10)
         .collect()
+}
+
+/// Convert a character index to a byte offset in `s`.
+fn char_idx_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b)
+}
+
+/// Splice `[[stem]]` into `source`, replacing the open `[[prefix` span that
+/// ends at `cursor_byte`, then reposition the `TextEdit` cursor after `]]`.
+fn apply_wiki_completion(
+    ui: &egui::Ui,
+    source: &mut String,
+    text_edit_id: egui::Id,
+    cursor_byte: usize,
+    stem: &str,
+) {
+    let open_pos = source[..cursor_byte]
+        .rfind("[[")
+        .unwrap_or_else(|| cursor_byte.saturating_sub(2));
+    let completion = format!("[[{stem}]]");
+    let open_char = source[..open_pos].chars().count();
+    let new_char = open_char + completion.chars().count();
+    source.replace_range(open_pos..cursor_byte, &completion);
+    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), text_edit_id) {
+        let ccursor = egui::text::CCursor::new(new_char);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(ccursor)));
+        egui::TextEdit::store_state(ui.ctx(), text_edit_id, state);
+    }
+}
+
+/// Keyboard events intercepted from the `InputState` before the `TextEdit`
+/// processes them (so the popup owns Enter/Escape/arrows instead).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Default)]
+struct PopupKeys {
+    enter: bool,
+    escape: bool,
+    down: bool,
+    up: bool,
 }
 
 /// Register the precomputed `link_targets` from a cached preview with the
@@ -144,47 +185,148 @@ pub fn raw_editor(
     note: &mut NoteRecord,
     word_wrap: bool,
     pending_jump: &mut Option<usize>,
+    folder_index: &FolderIndex,
+    popup: &mut WikiLinkPopup,
 ) -> bool {
     let line_count = note.source.lines().count().max(1);
     let mut changed = false;
+
+    // Consume popup-navigation keys before TextEdit processes them so that
+    // Enter doesn't insert a newline and arrow keys don't move the text cursor.
+    let keys = if popup.is_empty() {
+        PopupKeys::default()
+    } else {
+        ui.input_mut(|i| {
+            let keys = PopupKeys {
+                enter: i.key_pressed(egui::Key::Enter),
+                escape: i.key_pressed(egui::Key::Escape),
+                down: i.key_pressed(egui::Key::ArrowDown),
+                up: i.key_pressed(egui::Key::ArrowUp),
+            };
+            i.events.retain(|e| match e {
+                egui::Event::Key {
+                    key, pressed: true, ..
+                } => !matches!(
+                    key,
+                    egui::Key::Enter
+                        | egui::Key::Escape
+                        | egui::Key::ArrowDown
+                        | egui::Key::ArrowUp
+                ),
+                _ => true,
+            });
+            keys
+        })
+    };
 
     if word_wrap {
         egui::ScrollArea::vertical()
             .id_salt("raw_vscroll")
             .show(ui, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::multiline(&mut note.source)
-                        .code_editor()
-                        .desired_width(ui.available_width())
-                        .desired_rows(line_count)
-                        .lock_focus(true),
-                );
+                let output = egui::TextEdit::multiline(&mut note.source)
+                    .code_editor()
+                    .desired_width(ui.available_width())
+                    .desired_rows(line_count)
+                    .lock_focus(true)
+                    .show(ui);
                 if let Some(offset) = pending_jump.take() {
-                    scroll_text_edit_to_offset(ui, &response, offset);
+                    scroll_text_edit_to_offset(ui, &output.response, offset);
                 }
-                changed = response.changed();
+                changed |= output.response.changed();
+                raw_popup_pass(
+                    ui,
+                    &mut note.source,
+                    folder_index,
+                    popup,
+                    &output,
+                    &keys,
+                    &mut changed,
+                );
             });
     } else {
         let mut layouter = nowrap_layouter();
         egui::ScrollArea::both()
             .id_salt("raw_both_scroll")
             .show(ui, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::multiline(&mut note.source)
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(line_count)
-                        .lock_focus(true)
-                        .layouter(&mut layouter),
-                );
+                let output = egui::TextEdit::multiline(&mut note.source)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(line_count)
+                    .lock_focus(true)
+                    .layouter(&mut layouter)
+                    .show(ui);
                 if let Some(offset) = pending_jump.take() {
-                    scroll_text_edit_to_offset(ui, &response, offset);
+                    scroll_text_edit_to_offset(ui, &output.response, offset);
                 }
-                changed = response.changed();
+                changed |= output.response.changed();
+                raw_popup_pass(
+                    ui,
+                    &mut note.source,
+                    folder_index,
+                    popup,
+                    &output,
+                    &keys,
+                    &mut changed,
+                );
             });
     }
 
     changed
+}
+
+/// Post-TextEdit pass: compute popup items from cursor position and folder
+/// index, then show the popup or apply the selected completion.
+fn raw_popup_pass(
+    ui: &egui::Ui,
+    source: &mut String,
+    folder_index: &FolderIndex,
+    popup: &mut WikiLinkPopup,
+    output: &egui::widgets::text_edit::TextEditOutput,
+    keys: &PopupKeys,
+    changed: &mut bool,
+) {
+    let Some(char_idx) = output
+        .cursor_range
+        .and_then(|r| r.single())
+        .map(|c| c.index)
+    else {
+        popup.set_items(vec![]);
+        return;
+    };
+    let cursor_byte = char_idx_to_byte(source, char_idx);
+
+    let Some(prefix) = find_wiki_link_prefix(source, cursor_byte).map(ToOwned::to_owned) else {
+        popup.set_items(vec![]);
+        return;
+    };
+
+    let all_stems: Vec<&str> = folder_index.note_stems().collect();
+    let filtered = complete_note_links(&all_stems, &prefix);
+    popup.set_items(filtered.iter().map(|&s| s.to_string()).collect());
+
+    if keys.escape {
+        popup.set_items(vec![]);
+        return;
+    }
+    if keys.down {
+        popup.select_next();
+    }
+    if keys.up {
+        popup.select_prev();
+    }
+    if keys.enter {
+        if let Some(stem) = popup.selected_item() {
+            apply_wiki_completion(ui, source, output.response.id, cursor_byte, stem);
+            *changed = true;
+            popup.set_items(vec![]);
+        }
+        return;
+    }
+    if let Some(WikiLinkAction::Selected(stem)) = popup.show(ui, &output.response) {
+        apply_wiki_completion(ui, source, output.response.id, cursor_byte, &stem);
+        *changed = true;
+        popup.set_items(vec![]);
+    }
 }
 
 /// Position the cursor at `offset` inside the `TextEdit` whose response was

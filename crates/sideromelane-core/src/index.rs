@@ -198,6 +198,14 @@ impl FolderIndex {
             edges,
         }
     }
+
+    /// Returns file stems of every note in the index, in deterministic order.
+    pub fn note_stems(&self) -> impl Iterator<Item = &str> {
+        self.graph.nodes().iter().filter_map(|n| match n {
+            GraphNode::Note { note_id } => Some(note_id.file_stem()),
+            GraphNode::Tag { .. } => None,
+        })
+    }
 }
 
 /// Depth-bounded view of [`FolderIndex`] centered on a single node.

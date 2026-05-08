@@ -142,6 +142,8 @@ struct SideromelaneApp {
     /// once the user clears every open modal — subsequent watcher events
     /// then refill `pending_conflicts` normally.
     pending_conflicts_dropped: usize,
+    /// Wiki-link autocomplete popup state shared between raw and live-preview editors.
+    wiki_link_popup: wiki_link_popup::WikiLinkPopup,
 }
 
 impl SideromelaneApp {
@@ -171,6 +173,7 @@ impl SideromelaneApp {
             watcher: None,
             pending_conflicts: Vec::new(),
             pending_conflicts_dropped: 0,
+            wiki_link_popup: wiki_link_popup::WikiLinkPopup::default(),
         }
     }
 }
@@ -1201,6 +1204,8 @@ impl SideromelaneApp {
                 &mut folder.notes[index],
                 word_wrap,
                 &mut self.pending_jump,
+                &folder.folder_index,
+                &mut self.wiki_link_popup,
             ),
             EditorMode::LivePreview => live_preview_editor(
                 ui,

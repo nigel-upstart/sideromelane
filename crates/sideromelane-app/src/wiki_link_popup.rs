@@ -4,8 +4,6 @@
 //! The caller owns [`WikiLinkPopup`] state and passes the `TextEdit` response
 //! to [`WikiLinkPopup::show`] each frame the popup should be visible.
 
-#![allow(dead_code)]
-
 use eframe::egui;
 
 /// Action returned by [`WikiLinkPopup::show`] when the user commits or dismisses.
@@ -50,6 +48,10 @@ impl WikiLinkPopup {
     /// Return the currently-highlighted stem, or `None` if the list is empty.
     pub(crate) fn selected_item(&self) -> Option<&str> {
         self.items.get(self.selected).map(String::as_str)
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
     /// Render the popup anchored below `anchor_response`.
