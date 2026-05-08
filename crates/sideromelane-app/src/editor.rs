@@ -220,7 +220,15 @@ pub fn live_preview_editor(
 
     let note_stem = note.note_id.file_stem().to_owned();
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    let scroll_area = if word_wrap {
+        egui::ScrollArea::vertical().id_salt("lp_vscroll")
+    } else {
+        egui::ScrollArea::both().id_salt("lp_both_scroll")
+    };
+    scroll_area.show(ui, |ui| {
+        if !word_wrap {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        }
         // Page navigation when not editing a block.
         if active_block_index.is_none() {
             let page = ui.clip_rect().height();
