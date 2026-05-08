@@ -1218,6 +1218,8 @@ impl SideromelaneApp {
                 &mut self.commonmark_cache_bytes,
                 &mut self.block_preview_cache,
                 &mut self.pending_link_click,
+                &folder.folder_index,
+                &mut self.wiki_link_popup,
             ),
             EditorMode::Graph => {
                 let default_focus = graph_view::note_focus(&folder.notes[index].note_id);

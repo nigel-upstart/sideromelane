@@ -357,6 +357,8 @@ pub fn live_preview_editor(
     cache_bytes: &mut usize,
     block_preview_cache: &mut BlockPreviewCache,
     pending_link_click: &mut Option<String>,
+    folder_index: &FolderIndex,
+    popup: &mut WikiLinkPopup,
 ) -> bool {
     let blocks = markdown_blocks(&note.source);
 
@@ -415,17 +417,56 @@ pub fn live_preview_editor(
             let group_response = frame.show(ui, |ui| {
                 if is_active {
                     let mut text = block.text.clone();
+
+                    let keys = if popup.is_empty() {
+                        PopupKeys::default()
+                    } else {
+                        ui.input_mut(|i| {
+                            let keys = PopupKeys {
+                                enter: i.key_pressed(egui::Key::Enter),
+                                escape: i.key_pressed(egui::Key::Escape),
+                                down: i.key_pressed(egui::Key::ArrowDown),
+                                up: i.key_pressed(egui::Key::ArrowUp),
+                            };
+                            i.events.retain(|e| match e {
+                                egui::Event::Key {
+                                    key, pressed: true, ..
+                                } => !matches!(
+                                    key,
+                                    egui::Key::Enter
+                                        | egui::Key::Escape
+                                        | egui::Key::ArrowDown
+                                        | egui::Key::ArrowUp
+                                ),
+                                _ => true,
+                            });
+                            keys
+                        })
+                    };
+
                     let mut layouter = nowrap_layouter();
                     let widget = egui::TextEdit::multiline(&mut text)
                         .code_editor()
                         .desired_width(active_block_width)
                         .desired_rows(block.text.lines().count().max(1));
-                    let response = if word_wrap {
-                        ui.add(widget)
+                    let output = if word_wrap {
+                        widget.show(ui)
                     } else {
-                        ui.add(widget.layouter(&mut layouter))
+                        widget.layouter(&mut layouter).show(ui)
                     };
-                    if response.changed() {
+
+                    let mut completion_changed = false;
+                    raw_popup_pass(
+                        ui,
+                        &mut text,
+                        folder_index,
+                        popup,
+                        &output,
+                        &keys,
+                        &mut completion_changed,
+                    );
+
+                    if output.response.changed() || completion_changed {
                         changed_block = Some((block.range.clone(), text));
                     }
                 } else {
