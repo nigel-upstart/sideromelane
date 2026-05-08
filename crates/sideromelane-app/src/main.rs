@@ -988,6 +988,7 @@ impl SideromelaneApp {
             folder.selected = selected_note;
             self.active_block_index = None;
             self.graph_focus = None;
+            self.wiki_link_popup = wiki_link_popup::WikiLinkPopup::default();
         }
 
         let pending_settings_save = if tree_changed {

@@ -115,8 +115,19 @@ fn char_idx_to_byte(s: &str, char_idx: usize) -> usize {
     s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b)
 }
 
-/// Splice `[[stem]]` into `source`, replacing the open `[[prefix` span that
-/// ends at `cursor_byte`, then reposition the `TextEdit` cursor after `]]`.
+/// Splice `[[stem]]` into `source`, replacing the `[[prefix` span ending at
+/// `cursor_byte`. Returns the new cursor char-position, or `None` if no `[[`
+/// precedes `cursor_byte`.
+fn splice_wiki_completion(source: &mut String, cursor_byte: usize, stem: &str) -> Option<usize> {
+    let open_pos = source[..cursor_byte].rfind("[[")?;
+    let completion = format!("[[{stem}]]");
+    let open_char = source[..open_pos].chars().count();
+    let new_char = open_char + completion.chars().count();
+    source.replace_range(open_pos..cursor_byte, &completion);
+    Some(new_char)
+}
+
+/// Splice `[[stem]]` into `source` and reposition the `TextEdit` cursor after `]]`.
 fn apply_wiki_completion(
     ui: &egui::Ui,
     source: &mut String,
@@ -124,13 +135,9 @@ fn apply_wiki_completion(
     cursor_byte: usize,
     stem: &str,
 ) {
-    let open_pos = source[..cursor_byte]
-        .rfind("[[")
-        .unwrap_or_else(|| cursor_byte.saturating_sub(2));
-    let completion = format!("[[{stem}]]");
-    let open_char = source[..open_pos].chars().count();
-    let new_char = open_char + completion.chars().count();
-    source.replace_range(open_pos..cursor_byte, &completion);
+    let Some(new_char) = splice_wiki_completion(source, cursor_byte, stem) else {
+        return;
+    };
     if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), text_edit_id) {
         let ccursor = egui::text::CCursor::new(new_char);
         state
@@ -680,9 +687,9 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        BlockPreviewCache, CachedBlockPreview, complete_note_links, extract_note_link_targets,
-        find_wiki_link_prefix, get_or_insert_cached_preview, hash_block_text,
-        sweep_stale_block_previews,
+        BlockPreviewCache, CachedBlockPreview, char_idx_to_byte, complete_note_links,
+        extract_note_link_targets, find_wiki_link_prefix, get_or_insert_cached_preview,
+        hash_block_text, splice_wiki_completion, sweep_stale_block_previews,
     };
 
     #[test]
@@ -882,5 +889,79 @@ mod tests {
         let source = "[[Focus]]";
         let cursor_byte = source.len();
         assert!(find_wiki_link_prefix(source, cursor_byte).is_none());
+    }
+
+    // ── char_idx_to_byte ─────────────────────────────────────────────────
+
+    #[test]
+    fn char_idx_to_byte_ascii_identity() {
+        assert_eq!(char_idx_to_byte("hello", 3), 3);
+    }
+
+    #[test]
+    fn char_idx_to_byte_multibyte_char() {
+        // "café": c=0, a=1, f=2, é=3 (2 bytes). Char 4 starts at byte 5.
+        assert_eq!(char_idx_to_byte("café", 3), 3);
+        assert_eq!(char_idx_to_byte("café", 4), 5);
+    }
+
+    #[test]
+    fn char_idx_to_byte_past_end_clamps_to_len() {
+        assert_eq!(char_idx_to_byte("hi", 99), 2);
+    }
+
+    #[test]
+    fn char_idx_to_byte_at_zero() {
+        assert_eq!(char_idx_to_byte("hello", 0), 0);
+    }
+
+    // ── splice_wiki_completion ────────────────────────────────────────────
+
+    #[test]
+    fn splice_completes_simple_prefix() {
+        let mut source = "text [[Fo".to_string();
+        let cursor_byte = source.len();
+        let new_char =
+            splice_wiki_completion(&mut source, cursor_byte, "Focus").expect("source contains [[");
+        assert_eq!(source, "text [[Focus]]");
+        assert_eq!(new_char, 14);
+    }
+
+    #[test]
+    fn splice_completes_at_bare_open_bracket() {
+        let mut source = "[[".to_string();
+        let cursor_byte = source.len();
+        let new_char =
+            splice_wiki_completion(&mut source, cursor_byte, "Alpha").expect("source contains [[");
+        assert_eq!(source, "[[Alpha]]");
+        assert_eq!(new_char, 9);
+    }
+
+    #[test]
+    fn splice_completes_with_longer_stem_than_prefix() {
+        let mut source = "[[A".to_string();
+        let cursor_byte = source.len();
+        splice_wiki_completion(&mut source, cursor_byte, "Alphabet").expect("source contains [[");
+        assert_eq!(source, "[[Alphabet]]");
+    }
+
+    #[test]
+    fn splice_handles_multibyte_text_before_bracket() {
+        // "café [[N" — 'é' is 2 bytes. open_pos is 7 (byte), open_char is 6.
+        let mut source = "café [[N".to_string();
+        let cursor_byte = source.len();
+        let new_char =
+            splice_wiki_completion(&mut source, cursor_byte, "Notes").expect("source contains [[");
+        assert_eq!(source, "café [[Notes]]");
+        // "café " before [[ is 5 chars; completion "[[Notes]]" is 9 chars
+        assert_eq!(new_char, 5 + 9);
+    }
+
+    #[test]
+    fn splice_returns_none_when_no_open_bracket() {
+        let mut source = "plain text".to_string();
+        let cursor_byte = source.len();
+        assert!(splice_wiki_completion(&mut source, cursor_byte, "Note").is_none());
+        assert_eq!(source, "plain text");
     }
 }
