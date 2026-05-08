@@ -13,6 +13,7 @@ mod preview;
 mod state;
 mod tree;
 mod watcher;
+pub(crate) mod wiki_link_popup;
 
 use std::collections::HashMap;
 use std::fs::{self, File};
