@@ -875,4 +875,36 @@ mod tests {
         let stems = ["MyNote"];
         assert_eq!(complete_note_links(&stems, "mynote"), vec!["MyNote"]);
     }
+
+    #[test]
+    fn popup_pipeline_filters_by_bracket_prefix() {
+        // Simulates: user types "[[Fo" in source, cursor at end.
+        // Verify find_wiki_link_prefix + complete_note_links return the right stems.
+        let source = "See [[Fo";
+        let cursor_byte = source.len();
+        let prefix = find_wiki_link_prefix(source, cursor_byte).expect("cursor inside [[ span");
+        assert_eq!(prefix, "Fo");
+        let stems = ["Focus", "Notes", "Filter"];
+        let results = complete_note_links(&stems, prefix);
+        assert_eq!(results, vec!["Focus"]);
+    }
+
+    #[test]
+    fn popup_pipeline_empty_prefix_shows_all_stems() {
+        let source = "[[";
+        let cursor_byte = source.len();
+        let prefix = find_wiki_link_prefix(source, cursor_byte).expect("cursor inside [[ span");
+        assert_eq!(prefix, "");
+        let stems = ["Alpha", "Beta", "Gamma"];
+        let results = complete_note_links(&stems, prefix);
+        assert_eq!(results, vec!["Alpha", "Beta", "Gamma"]);
+    }
+
+    #[test]
+    fn popup_pipeline_completed_link_shows_no_popup() {
+        // Once the link is closed with ]], find_wiki_link_prefix returns None.
+        let source = "[[Focus]]";
+        let cursor_byte = source.len();
+        assert!(find_wiki_link_prefix(source, cursor_byte).is_none());
+    }
 }
