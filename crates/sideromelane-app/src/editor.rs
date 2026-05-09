@@ -825,9 +825,9 @@ mod tests {
 
     #[test]
     fn wiki_prefix_mid_prefix() {
-        // "text [[Fo" — cursor mid-way through the prefix
-        let src = "text [[Fo";
-        assert_eq!(find_wiki_link_prefix(src, src.len()), Some("Fo"));
+        // "text [[Foc" — cursor mid-way through the prefix
+        let src = "text [[Foc";
+        assert_eq!(find_wiki_link_prefix(src, src.len()), Some("Foc"));
     }
 
     // ── complete_note_links ───────────────────────────────────────────────
@@ -861,12 +861,11 @@ mod tests {
 
     #[test]
     fn popup_pipeline_filters_by_bracket_prefix() {
-        // Simulates: user types "[[Fo" in source, cursor at end.
-        // Verify find_wiki_link_prefix + complete_note_links return the right stems.
-        let source = "See [[Fo";
+        // Simulates: user types "[[Foc" in source, cursor at end.
+        let source = "See [[Foc";
         let cursor_byte = source.len();
-        let prefix = find_wiki_link_prefix(source, cursor_byte).expect("cursor inside [[ span");
-        assert_eq!(prefix, "Fo");
+        let prefix = find_wiki_link_prefix(source, cursor_byte).expect("prefix");
+        assert_eq!(prefix, "Foc");
         let stems = ["Focus", "Notes", "Filter"];
         let results = complete_note_links(&stems, prefix);
         assert_eq!(results, vec!["Focus"]);
@@ -919,7 +918,7 @@ mod tests {
 
     #[test]
     fn splice_completes_simple_prefix() {
-        let mut source = "text [[Fo".to_string();
+        let mut source = "text [[Foc".to_string();
         let cursor_byte = source.len();
         let new_char =
             splice_wiki_completion(&mut source, cursor_byte, "Focus").expect("source contains [[");
