@@ -12,6 +12,7 @@ mod preferences;
 mod preview;
 mod state;
 mod tree;
+mod typography;
 mod watcher;
 pub(crate) mod wiki_link_popup;
 
@@ -39,6 +40,7 @@ use crate::io::safe_write;
 use crate::menu::{AppMenu, MenuAction};
 use crate::preferences::{PreferencesWindow, validate_default_folder};
 use crate::state::{AppState, StartupMode};
+use crate::typography::PreviewReadingFont;
 
 /// Maximum byte size of an image that can be dropped into the assets folder.
 const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -76,7 +78,14 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Sideromelane",
         native_options,
-        Box::new(move |_creation_context| Ok(Box::new(SideromelaneApp::new(app_state)))),
+        Box::new(move |creation_context| {
+            let preview_reading_font =
+                typography::install_preview_fonts(&creation_context.egui_ctx);
+            Ok(Box::new(SideromelaneApp::new(
+                app_state,
+                preview_reading_font,
+            )))
+        }),
     )
 }
 
@@ -144,10 +153,12 @@ struct SideromelaneApp {
     pending_conflicts_dropped: usize,
     /// Wiki-link autocomplete popup state shared between raw and live-preview editors.
     wiki_link_popup: wiki_link_popup::WikiLinkPopup,
+    /// Availability of the local system reading font for rendered preview text.
+    preview_reading_font: PreviewReadingFont,
 }
 
 impl SideromelaneApp {
-    fn new(app_state: AppState) -> Self {
+    fn new(app_state: AppState, preview_reading_font: PreviewReadingFont) -> Self {
         Self {
             folder: None,
             mode: EditorMode::default(),
@@ -174,6 +185,7 @@ impl SideromelaneApp {
             pending_conflicts: Vec::new(),
             pending_conflicts_dropped: 0,
             wiki_link_popup: wiki_link_popup::WikiLinkPopup::default(),
+            preview_reading_font,
         }
     }
 }
@@ -1221,6 +1233,7 @@ impl SideromelaneApp {
                 &mut self.pending_link_click,
                 &folder.folder_index,
                 &mut self.wiki_link_popup,
+                self.preview_reading_font,
             ),
             EditorMode::Graph => {
                 let default_focus = graph_view::note_focus(&folder.notes[index].note_id);
