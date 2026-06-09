@@ -17,6 +17,7 @@ mod watcher;
 pub(crate) mod wiki_link_popup;
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::fs::{self, File};
 use std::io as std_io;
 use std::io::Read;
@@ -94,6 +95,7 @@ struct SideromelaneApp {
     folder: Option<FolderState>,
     mode: EditorMode,
     search_text: String,
+    title_edit: TitleEditState,
     active_block_index: Option<usize>,
     /// Byte offset to jump to on the next frame. Set by outline row clicks;
     /// consumed by `raw_editor` / `live_preview_editor`.
@@ -163,6 +165,7 @@ impl SideromelaneApp {
             folder: None,
             mode: EditorMode::default(),
             search_text: String::new(),
+            title_edit: TitleEditState::default(),
             active_block_index: None,
             pending_jump: None,
             status: String::new(),
@@ -298,6 +301,30 @@ enum EditorMode {
     Graph,
 }
 
+#[derive(Debug, Default)]
+struct TitleEditState {
+    note_id: Option<NoteId>,
+    value: String,
+    error: Option<String>,
+}
+
+impl TitleEditState {
+    fn sync_to_note(&mut self, note_id: &NoteId) {
+        if self.note_id.as_ref() == Some(note_id) {
+            return;
+        }
+        self.note_id = Some(note_id.clone());
+        note_id.file_stem().clone_into(&mut self.value);
+        self.error = None;
+    }
+
+    fn accept_renamed_note(&mut self, note_id: &NoteId) {
+        self.note_id = Some(note_id.clone());
+        note_id.file_stem().clone_into(&mut self.value);
+        self.error = None;
+    }
+}
+
 /// User choice when a watcher reports an external change to a dirty note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConflictChoice {
@@ -307,6 +334,46 @@ enum ConflictChoice {
     /// Keep the in-memory buffer. The next auto-save sweep overwrites the
     /// disk version.
     Keep,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RenameNoteError {
+    EmptyTitle,
+    PathSeparator,
+    InvalidPath(sideromelane_core::FolderPathError),
+    Conflict(PathBuf),
+    Io(String),
+}
+
+impl fmt::Display for RenameNoteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyTitle => formatter.write_str("Title can't be empty"),
+            Self::PathSeparator => {
+                formatter.write_str("Title can't contain path separators or NUL bytes")
+            }
+            Self::InvalidPath(error) => write!(formatter, "Invalid title: {error}"),
+            Self::Conflict(path) => write!(formatter, "{} already exists", path.display()),
+            Self::Io(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for RenameNoteError {}
+
+impl From<sideromelane_core::FolderPathError> for RenameNoteError {
+    fn from(error: sideromelane_core::FolderPathError) -> Self {
+        Self::InvalidPath(error)
+    }
+}
+
+#[derive(Debug)]
+struct RenameNoteOutcome {
+    old_note_id: NoteId,
+    note_id: NoteId,
+    old_path: PathBuf,
+    new_path: PathBuf,
+    relative: String,
 }
 
 #[derive(Debug)]
@@ -421,6 +488,74 @@ impl NoteRecord {
             last_edit_at: Instant::now(),
         })
     }
+}
+
+fn rename_note_file(
+    folder_root: &Path,
+    note: &mut NoteRecord,
+    requested_stem: &str,
+) -> Result<Option<RenameNoteOutcome>, RenameNoteError> {
+    let stem = requested_stem.trim();
+    if stem.is_empty() {
+        return Err(RenameNoteError::EmptyTitle);
+    }
+    if stem.contains('/') || stem.contains('\\') || stem.contains('\0') {
+        return Err(RenameNoteError::PathSeparator);
+    }
+    if stem == note.note_id.file_stem() {
+        return Ok(None);
+    }
+
+    let new_relative = note_relative_path_with_stem(&note.note_id, stem)?;
+    let new_note_id = NoteId::from_folder_relative_path(new_relative)?;
+    let old_note_id = note.note_id.clone();
+    let old_path = note.absolute_path.clone();
+    let new_path = folder_root.join(new_note_id.relative_path());
+
+    if new_path.exists() && !paths_refer_to_same_file(&old_path, &new_path) {
+        return Err(RenameNoteError::Conflict(new_path));
+    }
+
+    if old_path.exists() {
+        fs::rename(&old_path, &new_path).map_err(|error| RenameNoteError::Io(error.to_string()))?;
+    } else if let Some(parent) = new_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| RenameNoteError::Io(error.to_string()))?;
+    }
+
+    note.note_id = new_note_id.clone();
+    note.absolute_path.clone_from(&new_path);
+
+    Ok(Some(RenameNoteOutcome {
+        old_note_id,
+        note_id: new_note_id,
+        old_path,
+        new_path,
+        relative: note.note_id.relative_path().display().to_string(),
+    }))
+}
+
+fn note_relative_path_with_stem(note_id: &NoteId, stem: &str) -> Result<PathBuf, RenameNoteError> {
+    let file_name = format!("{stem}.md");
+    let relative = note_id
+        .relative_path()
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(
+            || PathBuf::from(&file_name),
+            |parent| parent.join(&file_name),
+        );
+    NoteId::from_folder_relative_path(relative.clone())?;
+    Ok(relative)
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    let Ok(left) = fs::canonicalize(left) else {
+        return false;
+    };
+    let Ok(right) = fs::canonicalize(right) else {
+        return false;
+    };
+    left == right
 }
 
 impl SideromelaneApp {
@@ -1231,13 +1366,34 @@ impl SideromelaneApp {
             return;
         };
 
-        ui.horizontal(|ui| {
-            let note = &folder.notes[index];
-            ui.heading(note.note_id.file_stem());
-            if note.dirty {
-                ui.label("Unsaved");
+        let mut pending_rescan_root: Option<PathBuf> = None;
+        if let Some(new_stem) = render_note_title(ui, &mut self.title_edit, &folder.notes[index]) {
+            let folder_root = folder.root.clone();
+            match rename_note_file(&folder_root, &mut folder.notes[index], &new_stem) {
+                Ok(Some(outcome)) => {
+                    self.title_edit.accept_renamed_note(&outcome.note_id);
+                    self.status = format!("Renamed {}", outcome.relative);
+                    self.last_self_write_at
+                        .insert(canonicalize_path(&outcome.old_path), Instant::now());
+                    self.last_self_write_at
+                        .insert(canonicalize_path(&outcome.new_path), Instant::now());
+                    self.pending_conflicts
+                        .retain(|id| id != &outcome.old_note_id && id != &outcome.note_id);
+                    folder.rebuild_note_path_index();
+                    folder.cached_tree = None;
+                    self.active_block_index = None;
+                    self.graph_focus = None;
+                    pending_rescan_root = Some(folder_root);
+                }
+                Ok(None) => {
+                    self.title_edit
+                        .accept_renamed_note(&folder.notes[index].note_id);
+                }
+                Err(error) => {
+                    self.title_edit.error = Some(error.to_string());
+                }
             }
-        });
+        }
         ui.separator();
 
         let word_wrap = folder.settings.ui.editor_word_wrap;
@@ -1302,11 +1458,6 @@ impl SideromelaneApp {
             note.last_edit_at = Instant::now();
         }
 
-        // Drain any pending in-app link click. Navigates to the target note if it exists.
-        if let Some(target) = self.pending_link_click.take() {
-            self.navigate_to_note_by_name(&target);
-        }
-
         // Soft-reset the CommonMark cache once we cross the byte budget.
         // We do this AFTER rendering so the visible blocks were drawn from
         // the live cache; the next frame repopulates from cold but with
@@ -1317,6 +1468,16 @@ impl SideromelaneApp {
             self.block_preview_cache.clear();
             self.commonmark_cache_bytes = 0;
             "Preview cache reset (over 300 MiB)".clone_into(&mut self.status);
+        }
+
+        let _ = folder;
+        if let Some(root) = pending_rescan_root {
+            self.dispatch_rescan(root);
+        }
+
+        // Drain any pending in-app link click. Navigates to the target note if it exists.
+        if let Some(target) = self.pending_link_click.take() {
+            self.navigate_to_note_by_name(&target);
         }
     }
 
@@ -1468,6 +1629,43 @@ fn select_note(folder: &mut FolderState, note_id: &NoteId) {
         .notes
         .iter()
         .position(|note| &note.note_id == note_id);
+}
+
+fn render_note_title(
+    ui: &mut egui::Ui,
+    title_edit: &mut TitleEditState,
+    note: &NoteRecord,
+) -> Option<String> {
+    title_edit.sync_to_note(&note.note_id);
+    let mut commit_requested = false;
+
+    ui.horizontal(|ui| {
+        let edit_id = ui.make_persistent_id(("note-title", note.note_id.relative_path()));
+        let output = egui::TextEdit::singleline(&mut title_edit.value)
+            .id(edit_id)
+            .font(egui::TextStyle::Heading)
+            .desired_width((ui.available_width() - 72.0).max(180.0))
+            .show(ui);
+        let enter_pressed =
+            output.response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if output.response.changed() {
+            title_edit.error = None;
+        }
+        if enter_pressed {
+            output.response.surrender_focus();
+        }
+        commit_requested = enter_pressed || output.response.lost_focus();
+
+        if note.dirty {
+            ui.label("Unsaved");
+        }
+    });
+
+    if let Some(error) = &title_edit.error {
+        ui.colored_label(egui::Color32::from_rgb(190, 56, 56), error);
+    }
+
+    commit_requested.then(|| title_edit.value.clone())
 }
 
 const TREE_INDENT_PER_LEVEL: f32 = 14.0;
@@ -1807,12 +2005,25 @@ fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp, clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::Instant;
 
-    use super::{NoteId, clamp_split_height, refresh_auto_expanded_paths};
+    use sideromelane_core::NoteId;
+    use tempfile::TempDir;
+
+    use super::{
+        NoteRecord, RenameNoteError, clamp_split_height, refresh_auto_expanded_paths,
+        rename_note_file,
+    };
 
     fn note_id(path: &str) -> NoteId {
         NoteId::from_folder_relative_path(PathBuf::from(path)).expect("valid note id")
@@ -1862,5 +2073,101 @@ mod tests {
 
         assert!(!auto_expanded.contains("Projects"));
         assert!(auto_expanded.contains("Archive"));
+    }
+
+    fn note_record(root: &std::path::Path, relative: &str, source: &str) -> NoteRecord {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(&path, source).expect("write note");
+        NoteRecord {
+            note_id: NoteId::from_folder_relative_path(relative).expect("note id"),
+            absolute_path: path,
+            source: source.to_owned(),
+            dirty: false,
+            last_edit_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn rename_note_file_changes_filename_without_touching_body_h1() {
+        let directory = TempDir::new().expect("tempdir");
+        let mut note = note_record(directory.path(), "Old Title.md", "# Body H1\n\nContent\n");
+
+        let outcome = rename_note_file(directory.path(), &mut note, "New Title")
+            .expect("rename succeeds")
+            .expect("renamed");
+
+        assert_eq!(outcome.relative, "New Title.md");
+        assert_eq!(note.note_id.file_stem(), "New Title");
+        assert_eq!(note.source, "# Body H1\n\nContent\n");
+        assert!(!directory.path().join("Old Title.md").exists());
+        assert_eq!(
+            fs::read_to_string(directory.path().join("New Title.md")).expect("read renamed"),
+            "# Body H1\n\nContent\n",
+        );
+    }
+
+    #[test]
+    fn rename_note_file_preserves_existing_parent_directory() {
+        let directory = TempDir::new().expect("tempdir");
+        let mut note = note_record(directory.path(), "Projects/Old.md", "# Heading\n");
+
+        rename_note_file(directory.path(), &mut note, "New").expect("rename succeeds");
+
+        assert_eq!(
+            note.note_id.relative_path(),
+            std::path::Path::new("Projects/New.md")
+        );
+        assert!(directory.path().join("Projects/New.md").exists());
+    }
+
+    #[test]
+    fn rename_note_file_rejects_empty_title() {
+        let directory = TempDir::new().expect("tempdir");
+        let mut note = note_record(directory.path(), "Old.md", "# Old\n");
+
+        let error =
+            rename_note_file(directory.path(), &mut note, "   ").expect_err("blank title rejected");
+
+        assert_eq!(error, RenameNoteError::EmptyTitle);
+        assert_eq!(note.note_id.file_stem(), "Old");
+        assert!(directory.path().join("Old.md").exists());
+    }
+
+    #[test]
+    fn rename_note_file_rejects_path_separators() {
+        let directory = TempDir::new().expect("tempdir");
+        let mut note = note_record(directory.path(), "Old.md", "# Old\n");
+
+        let error = rename_note_file(directory.path(), &mut note, "Nested/New")
+            .expect_err("path move rejected");
+
+        assert_eq!(error, RenameNoteError::PathSeparator);
+        assert_eq!(note.note_id.file_stem(), "Old");
+        assert!(directory.path().join("Old.md").exists());
+        assert!(!directory.path().join("Nested/New.md").exists());
+    }
+
+    #[test]
+    fn rename_note_file_reports_existing_target_conflict() {
+        let directory = TempDir::new().expect("tempdir");
+        let mut note = note_record(directory.path(), "Old.md", "# Old\n");
+        fs::write(directory.path().join("Taken.md"), "# Taken\n").expect("seed conflict");
+
+        let error = rename_note_file(directory.path(), &mut note, "Taken")
+            .expect_err("existing target rejected");
+
+        assert!(matches!(error, RenameNoteError::Conflict(_)));
+        assert_eq!(note.note_id.file_stem(), "Old");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("Old.md")).expect("read old"),
+            "# Old\n",
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("Taken.md")).expect("read taken"),
+            "# Taken\n",
+        );
     }
 }
