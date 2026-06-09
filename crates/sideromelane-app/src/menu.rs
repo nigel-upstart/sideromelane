@@ -17,11 +17,16 @@
 //!
 //! - **File**: Open Folder… (⌘O), Recent Folders ▸, New Note (⌘N),
 //!   Save (⌘S), Close (⌘W).
+//! - **Edit**: Undo (⌘Z), Redo (⌘⇧Z), Cut (⌘X), Copy (⌘C),
+//!   Paste (⌘V), Select All (⌘A).
 //! - **View**: Show Graph (⌘G), Word Wrap (⌘⇧W).
 //! - **App**: Preferences… (no shortcut, per spec).
 
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 use muda::{
@@ -36,6 +41,7 @@ const RECENT_LABEL_MAX: usize = 64;
 
 /// Action triggered by a menu click. Mirrors the toolbar / Preferences entry
 /// points the rest of the app already exposes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub enum MenuAction {
     /// Open a folder picker (same as the toolbar "Open Folder" button).
@@ -46,6 +52,18 @@ pub enum MenuAction {
     Save,
     /// Close the active note tab. No-op while tabs are unimplemented.
     Close,
+    /// Undo the focused text edit's most recent edit.
+    Undo,
+    /// Redo the focused text edit's most recently undone edit.
+    Redo,
+    /// Cut the focused text edit's current selection.
+    Cut,
+    /// Copy the focused text edit's current selection.
+    Copy,
+    /// Paste clipboard contents into the focused text edit.
+    Paste,
+    /// Select all text in the focused text edit.
+    SelectAll,
     /// Toggle Graph mode (mutually exclusive with Raw / Live Preview).
     ToggleGraph,
     /// Toggle the per-folder editor word-wrap setting.
@@ -151,6 +169,65 @@ impl AppMenu {
         // so rebuilds re-insert the replacement at the same index.
         let recent_position = 1;
         let _ = menu.append(&file_menu);
+
+        // Edit menu.
+        let edit_menu = Submenu::new("Edit", true);
+        let undo = MenuItem::new(
+            "Undo",
+            true,
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyZ)),
+        );
+        actions.insert(undo.id().clone(), MenuAction::Undo);
+
+        let redo = MenuItem::new(
+            "Redo",
+            true,
+            Some(Accelerator::new(
+                Some(Modifiers::SUPER | Modifiers::SHIFT),
+                Code::KeyZ,
+            )),
+        );
+        actions.insert(redo.id().clone(), MenuAction::Redo);
+
+        let cut = MenuItem::new(
+            "Cut",
+            true,
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyX)),
+        );
+        actions.insert(cut.id().clone(), MenuAction::Cut);
+
+        let copy = MenuItem::new(
+            "Copy",
+            true,
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyC)),
+        );
+        actions.insert(copy.id().clone(), MenuAction::Copy);
+
+        let paste = MenuItem::new(
+            "Paste",
+            true,
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyV)),
+        );
+        actions.insert(paste.id().clone(), MenuAction::Paste);
+
+        let select_all = MenuItem::new(
+            "Select All",
+            true,
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyA)),
+        );
+        actions.insert(select_all.id().clone(), MenuAction::SelectAll);
+
+        let _ = edit_menu.append_items(&[
+            &undo,
+            &redo,
+            &PredefinedMenuItem::separator(),
+            &cut,
+            &copy,
+            &paste,
+            &PredefinedMenuItem::separator(),
+            &select_all,
+        ]);
+        let _ = menu.append(&edit_menu);
 
         // View menu.
         let view_menu = Submenu::new("View", true);
@@ -322,6 +399,7 @@ fn shorten(label: &str) -> String {
 pub struct AppMenu {}
 
 #[cfg(not(target_os = "macos"))]
+#[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
 impl AppMenu {
     /// Build a no-op menu. Accepts the same signature as the macOS variant.
     #[must_use]
@@ -333,7 +411,7 @@ impl AppMenu {
     pub const fn install_for_nsapp(&self) {}
 
     /// No-op on non-macOS targets.
-    pub fn rebuild_recent_submenu(&mut self, _recent: &[PathBuf]) {}
+    pub const fn rebuild_recent_submenu(&mut self, _recent: &[PathBuf]) {}
 
     /// Always returns `None` on non-macOS targets.
     #[must_use]
