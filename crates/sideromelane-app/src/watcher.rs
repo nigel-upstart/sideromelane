@@ -155,13 +155,12 @@ mod tests {
     ) -> Option<super::WatchEvent> {
         let start = Instant::now();
         while start.elapsed() < timeout {
-            if let Some(event) = watcher.poll() {
-                if event.path.file_name() == target.file_name() {
-                    return Some(event);
-                }
-            } else {
-                std::thread::sleep(Duration::from_millis(20));
+            if let Some(event) = watcher.poll()
+                && event.path.file_name() == target.file_name()
+            {
+                return Some(event);
             }
+            std::thread::sleep(Duration::from_millis(20));
         }
         None
     }
