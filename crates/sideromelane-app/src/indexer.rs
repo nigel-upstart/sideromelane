@@ -364,6 +364,66 @@ mod tests {
     }
 
     #[test]
+    fn rescan_omits_excluded_globs_from_notes_and_search() {
+        use sideromelane_core::SearchQuery;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        fs::write(tempdir.path().join("Keep.md"), "# keep\nvisible phrase\n")
+            .expect("write keep note");
+        fs::create_dir_all(tempdir.path().join("node_modules")).expect("mkdir node_modules");
+        fs::write(
+            tempdir.path().join("node_modules").join("Skip.md"),
+            "# skip\nsecret phrase\n",
+        )
+        .expect("write skipped note");
+
+        let indexer = Indexer::new(egui::Context::default());
+        indexer.send(IndexerCommand::Rescan {
+            root: tempdir.path().to_path_buf(),
+            options: WalkOptions {
+                excluded_globs: vec!["node_modules/**".to_string()],
+                ..WalkOptions::default()
+            },
+        });
+
+        let discovered = poll_for(&indexer, Duration::from_secs(2), |event| {
+            matches!(event, IndexerEvent::NotesDiscovered(_))
+        })
+        .expect("expected discovered notes");
+        match discovered {
+            IndexerEvent::NotesDiscovered(records) => {
+                assert_eq!(records.len(), 1);
+                assert_eq!(
+                    records[0].note_id,
+                    NoteId::from_folder_relative_path("Keep.md").expect("note id")
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let index_event = poll_for(&indexer, Duration::from_secs(2), |event| {
+            matches!(event, IndexerEvent::IndexUpdated { .. })
+        })
+        .expect("expected index update");
+        match index_event {
+            IndexerEvent::IndexUpdated { search, folder } => {
+                assert_eq!(search.search(&SearchQuery::text("secret")).len(), 0);
+                assert_eq!(search.search(&SearchQuery::text("visible")).len(), 1);
+                let skipped_id =
+                    NoteId::from_folder_relative_path("node_modules/Skip.md").expect("note id");
+                assert!(
+                    !folder
+                        .graph()
+                        .nodes()
+                        .iter()
+                        .any(|node| node.as_note() == Some(&skipped_id))
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn drop_joins_worker_thread_without_hanging() {
         let indexer = Indexer::new(egui::Context::default());
         let start = Instant::now();
