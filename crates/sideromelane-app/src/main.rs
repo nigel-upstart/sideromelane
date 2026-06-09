@@ -1750,7 +1750,7 @@ fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[allow(clippy::float_cmp, clippy::expect_used)]
 mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
