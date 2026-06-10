@@ -15,7 +15,7 @@ mod tree;
 mod watcher;
 pub(crate) mod wiki_link_popup;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io as std_io;
 use std::io::Read;
@@ -312,7 +312,11 @@ struct FolderState {
     /// visible. Kept in memory only (never persisted) so reopening the folder
     /// preserves the user's explicit expand/collapse choices, and dedup'd via
     /// the set rather than appended every frame.
-    auto_expanded: std::collections::BTreeSet<String>,
+    auto_expanded: BTreeSet<String>,
+    /// Selected note whose ancestors populated `auto_expanded`. This lets a
+    /// manual collapse of the current selection's folder stick until selection
+    /// changes.
+    auto_expanded_note: Option<NoteId>,
     /// Maps each note's absolute path to its index in `notes`. Refreshed
     /// whenever `notes` is mutated (`merge_discovered_notes`, `new_note`).
     /// Lets `classify_watch_event` resolve a watcher event in O(1) rather
@@ -345,7 +349,8 @@ impl FolderState {
             settings,
             indexes_ready: false,
             cached_tree: None,
-            auto_expanded: std::collections::BTreeSet::new(),
+            auto_expanded: BTreeSet::new(),
+            auto_expanded_note: None,
             note_path_index,
         })
     }
@@ -938,15 +943,15 @@ impl SideromelaneApp {
         // in-memory set so the user lands on a tree where their current note
         // is visible, without mutating (and re-persisting) the explicit
         // `tree_expanded_paths` every frame.
-        if let Some(selected_note) = folder
+        let selected_note = folder
             .selected
             .and_then(|index| folder.notes.get(index))
-            .map(|record| record.note_id.clone())
-        {
-            for ancestor in tree::ancestor_paths(&selected_note) {
-                folder.auto_expanded.insert(ancestor);
-            }
-        }
+            .map(|record| record.note_id.clone());
+        refresh_auto_expanded_paths(
+            &mut folder.auto_expanded,
+            &mut folder.auto_expanded_note,
+            selected_note.as_ref(),
+        );
 
         let mut selected_note = folder.selected;
         // Temporarily move the cached tree out of `folder` so we can pass
@@ -1502,6 +1507,27 @@ fn render_dir(
     }
 }
 
+fn refresh_auto_expanded_paths(
+    auto_expanded: &mut BTreeSet<String>,
+    auto_expanded_note: &mut Option<NoteId>,
+    selected_note: Option<&NoteId>,
+) {
+    if auto_expanded_note.as_ref() == selected_note {
+        return;
+    }
+
+    auto_expanded.clear();
+    match selected_note {
+        Some(note) => {
+            auto_expanded.extend(tree::ancestor_paths(note));
+            *auto_expanded_note = Some(note.clone());
+        }
+        None => {
+            *auto_expanded_note = None;
+        }
+    }
+}
+
 /// Converts a split `ratio` and an available `total_height` into the pixel
 /// height for the Files section, ensuring both Files and Search each have at
 /// least 80 px and the handle itself is accounted for.
@@ -1724,9 +1750,16 @@ fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[allow(clippy::float_cmp, clippy::expect_used)]
 mod tests {
-    use super::clamp_split_height;
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    use super::{NoteId, clamp_split_height, refresh_auto_expanded_paths};
+
+    fn note_id(path: &str) -> NoteId {
+        NoteId::from_folder_relative_path(PathBuf::from(path)).expect("valid note id")
+    }
 
     #[test]
     fn clamp_split_height_midpoint() {
@@ -1741,5 +1774,36 @@ mod tests {
     #[test]
     fn clamp_split_height_low_ratio_clamped() {
         assert_eq!(clamp_split_height(0.01, 200.0), 80.0);
+    }
+
+    #[test]
+    fn auto_expanded_paths_are_not_readded_for_same_selected_note() {
+        let note = note_id("Projects/Roadmap.md");
+        let mut auto_expanded = BTreeSet::new();
+        let mut auto_expanded_note = None;
+
+        refresh_auto_expanded_paths(&mut auto_expanded, &mut auto_expanded_note, Some(&note));
+        assert!(auto_expanded.contains("Projects"));
+
+        assert!(auto_expanded.remove("Projects"));
+        refresh_auto_expanded_paths(&mut auto_expanded, &mut auto_expanded_note, Some(&note));
+
+        assert!(!auto_expanded.contains("Projects"));
+    }
+
+    #[test]
+    fn auto_expanded_paths_refresh_when_selected_note_changes() {
+        let first = note_id("Projects/Roadmap.md");
+        let second = note_id("Archive/Done.md");
+        let mut auto_expanded = BTreeSet::new();
+        let mut auto_expanded_note = None;
+
+        refresh_auto_expanded_paths(&mut auto_expanded, &mut auto_expanded_note, Some(&first));
+        assert!(auto_expanded.contains("Projects"));
+
+        refresh_auto_expanded_paths(&mut auto_expanded, &mut auto_expanded_note, Some(&second));
+
+        assert!(!auto_expanded.contains("Projects"));
+        assert!(auto_expanded.contains("Archive"));
     }
 }
