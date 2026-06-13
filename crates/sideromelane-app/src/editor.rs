@@ -14,6 +14,7 @@ use sideromelane_core::FolderIndex;
 
 use crate::NoteRecord;
 use crate::preview::{NOTE_LINK_SCHEME, transform_wiki_links};
+use crate::typography::{PreviewReadingFont, apply_preview_text_style};
 use crate::wiki_link_popup::{WikiLinkAction, WikiLinkPopup};
 
 /// Cached output of the per-block live-preview pre-pass. `transformed` is the
@@ -366,6 +367,7 @@ pub fn live_preview_editor(
     pending_link_click: &mut Option<String>,
     folder_index: &FolderIndex,
     popup: &mut WikiLinkPopup,
+    preview_reading_font: PreviewReadingFont,
 ) -> bool {
     let blocks = markdown_blocks(&note.source);
 
@@ -489,7 +491,10 @@ pub fn live_preview_editor(
                         egui::Id::new(("sm-mdblock", &note_stem, index, block.range.start));
                     let response = ui
                         .push_id(source_id, |ui| {
-                            CommonMarkViewer::new().show(ui, cache, &cached.transformed);
+                            ui.scope(|ui| {
+                                apply_preview_text_style(ui.style_mut(), preview_reading_font);
+                                CommonMarkViewer::new().show(ui, cache, &cached.transformed);
+                            });
                         })
                         .response
                         .interact(Sense::click());
