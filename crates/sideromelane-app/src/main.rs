@@ -211,6 +211,11 @@ impl eframe::App for SideromelaneApp {
         self.handle_dropped_files(ui.ctx());
         self.auto_save_tick();
 
+        // Cmd+S: egui-layer handler so the shortcut fires even when TextEdit has focus.
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+            self.save_selected();
+        }
+
         egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open Folder").clicked() {

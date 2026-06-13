@@ -155,13 +155,12 @@ mod tests {
     ) -> Option<super::WatchEvent> {
         let start = Instant::now();
         while start.elapsed() < timeout {
-            if let Some(event) = watcher.poll() {
-                if event.path.file_name() == target.file_name() {
-                    return Some(event);
-                }
-            } else {
-                std::thread::sleep(Duration::from_millis(20));
+            if let Some(event) = watcher.poll()
+                && event.path.file_name() == target.file_name()
+            {
+                return Some(event);
             }
+            std::thread::sleep(Duration::from_millis(20));
         }
         None
     }
@@ -182,6 +181,7 @@ mod tests {
         // on macOS) so compare by file name rather than the full path.
         let event = poll_for_path_event(&watcher, &target, POLL_TIMEOUT)
             .expect("expected a WatchEvent for note.md within the timeout");
+        assert_eq!(event.path.file_name(), target.file_name());
         assert_eq!(event.kind, WatchKind::Modify);
     }
 
