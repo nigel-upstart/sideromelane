@@ -12,7 +12,7 @@ use std::path::Path;
 
 use eframe::egui;
 
-use crate::state::{AppState, StartupMode};
+use crate::state::{AppState, StartupMode, parse_excluded_file_globs};
 
 /// Errors returned by [`validate_default_folder`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +179,18 @@ impl PreferencesWindow {
                     .changed()
                 {
                     state.default_word_wrap = wrap;
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.heading("Excluded Files");
+                let mut excluded_files = state.excluded_file_globs.join("\n");
+                let response = ui.add_sized(
+                    egui::Vec2::new(ui.available_width(), 96.0),
+                    egui::TextEdit::multiline(&mut excluded_files).desired_rows(5),
+                );
+                if response.changed() {
+                    state.excluded_file_globs = parse_excluded_file_globs(&excluded_files);
                     changed = true;
                 }
             });

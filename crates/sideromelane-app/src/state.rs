@@ -39,6 +39,9 @@ const DEFAULT_AUTO_SAVE_DEBOUNCE_SECS: u32 = 5;
 const MIN_AUTO_SAVE_DEBOUNCE_SECS: u32 = 1;
 const MAX_AUTO_SAVE_DEBOUNCE_SECS: u32 = 60;
 
+/// Default app-wide excluded-file glob patterns.
+pub const DEFAULT_EXCLUDED_FILE_GLOBS: &[&str] = &[".git/**", ".DS_Store", "node_modules/**"];
+
 /// What to open on launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StartupMode {
@@ -80,6 +83,9 @@ pub struct AppState {
     /// Default word-wrap setting applied when initializing a fresh folder.
     #[serde(default = "default_word_wrap")]
     pub default_word_wrap: bool,
+    /// App-wide file and folder glob patterns hidden from discovery surfaces.
+    #[serde(default = "default_excluded_file_globs")]
+    pub excluded_file_globs: Vec<String>,
 }
 
 impl Default for AppState {
@@ -94,6 +100,7 @@ impl Default for AppState {
             left_pane_split_ratio: DEFAULT_LEFT_PANE_SPLIT_RATIO,
             auto_save_debounce_secs: DEFAULT_AUTO_SAVE_DEBOUNCE_SECS,
             default_word_wrap: true,
+            excluded_file_globs: default_excluded_file_globs(),
         }
     }
 }
@@ -120,6 +127,29 @@ const fn default_auto_save_debounce_secs() -> u32 {
 
 const fn default_word_wrap() -> bool {
     true
+}
+
+fn default_excluded_file_globs() -> Vec<String> {
+    DEFAULT_EXCLUDED_FILE_GLOBS
+        .iter()
+        .map(|pattern| (*pattern).to_owned())
+        .collect()
+}
+
+/// Parses the Preferences multiline editor into normalized glob patterns.
+#[must_use]
+pub fn parse_excluded_file_globs(text: &str) -> Vec<String> {
+    let mut globs = Vec::new();
+    for pattern in text
+        .lines()
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+    {
+        if !globs.iter().any(|existing| existing == pattern) {
+            globs.push(pattern.to_owned());
+        }
+    }
+    globs
 }
 
 /// Errors produced while loading or saving [`AppState`].
@@ -272,6 +302,7 @@ impl AppState {
         if self.recent_folders.len() > RECENT_FOLDERS_CAP {
             self.recent_folders.truncate(RECENT_FOLDERS_CAP);
         }
+        self.excluded_file_globs = parse_excluded_file_globs(&self.excluded_file_globs.join("\n"));
     }
 }
 
@@ -281,7 +312,10 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
-    use super::{APP_STATE_FILE, AppState, AppStateError, RECENT_FOLDERS_CAP, StartupMode};
+    use super::{
+        APP_STATE_FILE, AppState, AppStateError, DEFAULT_EXCLUDED_FILE_GLOBS, RECENT_FOLDERS_CAP,
+        StartupMode, parse_excluded_file_globs,
+    };
 
     fn state_path(dir: &TempDir) -> std::path::PathBuf {
         dir.path().join(APP_STATE_FILE)
@@ -299,6 +333,7 @@ mod tests {
         assert!((state.left_pane_split_ratio - 0.55).abs() < f32::EPSILON);
         assert_eq!(state.auto_save_debounce_secs, 5);
         assert!(state.default_word_wrap);
+        assert_eq!(state.excluded_file_globs, DEFAULT_EXCLUDED_FILE_GLOBS);
     }
 
     #[test]
@@ -310,6 +345,7 @@ mod tests {
             last_folder: Some(dir.path().to_path_buf()),
             last_note: Some("Inbox.md".into()),
             default_word_wrap: false,
+            excluded_file_globs: vec!["target/**".into(), "**/.obsidian/**".into()],
             ..AppState::default()
         };
         state.set_left_pane_split_ratio(0.42);
@@ -325,6 +361,10 @@ mod tests {
         assert!((loaded.left_pane_split_ratio - 0.42).abs() < 1e-6);
         assert_eq!(loaded.auto_save_debounce_secs, 15);
         assert!(!loaded.default_word_wrap);
+        assert_eq!(
+            loaded.excluded_file_globs,
+            vec!["target/**".to_string(), "**/.obsidian/**".to_string()]
+        );
         assert_eq!(
             loaded
                 .recent_folders
@@ -383,6 +423,7 @@ mod tests {
             "default_folder": "/tmp/x",
             "left_pane_split_ratio": 5.0_f32,
             "auto_save_debounce_secs": 9999,
+            "excluded_file_globs": ["", " node_modules/** ", "node_modules/**"],
         });
         std::fs::write(&path, serde_json::to_vec_pretty(&raw).expect("serialize"))
             .expect("seed file");
@@ -392,5 +433,15 @@ mod tests {
         assert!(loaded.left_pane_split_ratio >= 0.1);
         assert!(loaded.auto_save_debounce_secs <= 60);
         assert!(loaded.auto_save_debounce_secs >= 1);
+        assert_eq!(loaded.excluded_file_globs, vec!["node_modules/**"]);
+    }
+
+    #[test]
+    fn parse_excluded_file_globs_trims_blanks_and_dedups() {
+        let parsed = parse_excluded_file_globs(" .git/** \n\nnode_modules/**\n.git/**\r\n");
+        assert_eq!(
+            parsed,
+            vec![".git/**".to_string(), "node_modules/**".to_string()]
+        );
     }
 }
