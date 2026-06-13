@@ -145,18 +145,18 @@ mod tests {
     /// noticeably later than the configured window.
     const POLL_TIMEOUT: Duration = Duration::from_secs(2);
 
-    /// Drain events until one whose file name matches `target`, skipping
+    /// Drain events until one matches the supplied predicate, skipping
     /// spurious platform events (e.g. macOS emits temp-file events alongside
     /// the real write event during `fs::write`).
-    fn poll_for_path_event(
+    fn poll_for_event_matching(
         watcher: &Watcher,
-        target: &std::path::Path,
         timeout: Duration,
+        mut is_match: impl FnMut(&super::WatchEvent) -> bool,
     ) -> Option<super::WatchEvent> {
         let start = Instant::now();
         while start.elapsed() < timeout {
             if let Some(event) = watcher.poll()
-                && event.path.file_name() == target.file_name()
+                && is_match(&event)
             {
                 return Some(event);
             }
@@ -179,8 +179,11 @@ mod tests {
 
         // FS-event canonicalization can resolve symlinks (`/private/tmp/...`
         // on macOS) so compare by file name rather than the full path.
-        let event = poll_for_path_event(&watcher, &target, POLL_TIMEOUT)
-            .expect("expected a WatchEvent for note.md within the timeout");
+        let event = poll_for_event_matching(&watcher, POLL_TIMEOUT, |event| {
+            event.path.file_name() == target.file_name()
+        })
+        .expect("expected a WatchEvent for note.md within the timeout");
+
         assert_eq!(event.path.file_name(), target.file_name());
         assert_eq!(event.kind, WatchKind::Modify);
     }

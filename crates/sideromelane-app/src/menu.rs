@@ -408,13 +408,16 @@ impl AppMenu {
     }
 
     /// No-op on non-macOS targets.
+    #[allow(clippy::unused_self)]
     pub const fn install_for_nsapp(&self) {}
 
     /// No-op on non-macOS targets.
+    #[allow(clippy::needless_pass_by_ref_mut, clippy::unused_self)]
     pub const fn rebuild_recent_submenu(&mut self, _recent: &[PathBuf]) {}
 
     /// Always returns `None` on non-macOS targets.
     #[must_use]
+    #[allow(clippy::unused_self)]
     pub const fn poll(&self) -> Option<MenuAction> {
         None
     }
