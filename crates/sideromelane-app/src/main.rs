@@ -2030,13 +2030,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        NoteRecord, RenameNoteError, clamp_split_height, refresh_auto_expanded_paths,
-        rename_note_file,
-    };
-
-    use super::{
-        FolderState, NoteRecord, build_note_path_index, clamp_split_height, initial_note,
-        merge_discovered_notes, refresh_auto_expanded_paths, walk_options_for,
+        FolderState, NoteRecord, RenameNoteError, build_note_path_index, clamp_split_height,
+        initial_note, merge_discovered_notes, refresh_auto_expanded_paths, rename_note_file,
+        walk_options_for,
     };
     use crate::{indexer, state::AppState};
 
@@ -2180,6 +2176,8 @@ mod tests {
             fs::read_to_string(directory.path().join("Taken.md")).expect("read taken"),
             "# Taken\n",
         );
+    }
+
     #[test]
     fn walk_options_include_global_excluded_file_globs() {
         let app_state = AppState {
