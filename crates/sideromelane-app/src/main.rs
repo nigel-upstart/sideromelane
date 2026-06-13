@@ -620,6 +620,27 @@ impl SideromelaneApp {
             MenuAction::NewNote => self.new_note(),
             MenuAction::Save => self.save_selected(),
             MenuAction::Close => self.close_active_note(),
+            MenuAction::Undo => {
+                dispatch_edit_shortcut(ctx, egui::Key::Z, egui::Modifiers::COMMAND);
+            }
+            MenuAction::Redo => dispatch_edit_shortcut(
+                ctx,
+                egui::Key::Z,
+                egui::Modifiers::SHIFT | egui::Modifiers::COMMAND,
+            ),
+            MenuAction::Cut => {
+                dispatch_edit_event(ctx, egui::Event::Cut);
+            }
+            MenuAction::Copy => {
+                dispatch_edit_event(ctx, egui::Event::Copy);
+            }
+            MenuAction::Paste => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                ctx.request_repaint();
+            }
+            MenuAction::SelectAll => {
+                dispatch_edit_shortcut(ctx, egui::Key::A, egui::Modifiers::COMMAND);
+            }
             MenuAction::ToggleGraph => self.toggle_graph_mode(),
             MenuAction::ToggleWordWrap => self.toggle_word_wrap(),
             MenuAction::ShowPreferences => self.show_preferences(),
@@ -1417,6 +1438,24 @@ impl SideromelaneApp {
             self.active_block_index = None;
         }
     }
+}
+
+fn dispatch_edit_event(ctx: &egui::Context, event: egui::Event) {
+    ctx.input_mut(|input| input.events.push(event));
+    ctx.request_repaint();
+}
+
+fn dispatch_edit_shortcut(ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) {
+    dispatch_edit_event(
+        ctx,
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        },
+    );
 }
 
 fn select_note(folder: &mut FolderState, note_id: &NoteId) {
