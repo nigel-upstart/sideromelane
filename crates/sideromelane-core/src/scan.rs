@@ -7,6 +7,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder};
 
 /// Default maximum depth to defend against pathological folder layouts.
@@ -24,6 +25,8 @@ pub struct WalkOptions {
     pub honor_gitignore: bool,
     /// Additional ignore filenames the walker should consult.
     pub extra_ignore_files: Vec<PathBuf>,
+    /// App-wide glob patterns evaluated relative to the walked root.
+    pub excluded_globs: Vec<String>,
     /// Maximum directory depth. Defaults to a depth of 64.
     pub max_depth: Option<usize>,
 }
@@ -35,6 +38,7 @@ impl Default for WalkOptions {
             include_dotfiles: false,
             honor_gitignore: false,
             extra_ignore_files: Vec::new(),
+            excluded_globs: Vec::new(),
             max_depth: Some(DEFAULT_MAX_DEPTH),
         }
     }
@@ -74,6 +78,7 @@ impl std::error::Error for ScanError {
 /// - Restricts depth to [`WalkOptions::max_depth`].
 /// - Filters to files with a case-insensitive `.md` extension.
 pub fn walk_markdown_paths(root: &Path, options: &WalkOptions) -> Result<Vec<PathBuf>, ScanError> {
+    let excluded_globs = build_excluded_globs(root, &options.excluded_globs)?;
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(false)
@@ -90,8 +95,13 @@ pub fn walk_markdown_paths(root: &Path, options: &WalkOptions) -> Result<Vec<Pat
         builder.add_ignore(extra);
     }
 
-    // Always exclude the app's metadata directory.
-    builder.filter_entry(|entry| !is_sideromelane_metadata(entry));
+    // Always exclude the app's metadata directory, then apply app-wide
+    // exclusion globs before descending so ignored folders stay hidden.
+    let root = root.to_path_buf();
+    builder.filter_entry(move |entry| {
+        !is_sideromelane_metadata(entry)
+            && !is_excluded_entry(&root, entry, excluded_globs.as_ref())
+    });
 
     let mut paths = Vec::new();
     for entry in builder.build() {
@@ -118,6 +128,52 @@ fn is_sideromelane_metadata(entry: &DirEntry) -> bool {
             .file_name()
             .to_str()
             .is_some_and(|name| name == ".sideromelane")
+}
+
+fn build_excluded_globs(root: &Path, patterns: &[String]) -> Result<Option<Gitignore>, ScanError> {
+    let mut builder = GitignoreBuilder::new(root);
+    let mut has_patterns = false;
+
+    for pattern in patterns.iter().map(|pattern| pattern.trim()) {
+        if pattern.is_empty() {
+            continue;
+        }
+        builder.add_line(None, pattern).map_err(ScanError::Walk)?;
+        has_patterns = true;
+    }
+
+    if has_patterns {
+        builder.build().map(Some).map_err(ScanError::Walk)
+    } else {
+        Ok(None)
+    }
+}
+
+fn is_excluded_entry(root: &Path, entry: &DirEntry, excluded_globs: Option<&Gitignore>) -> bool {
+    let Some(excluded_globs) = excluded_globs else {
+        return false;
+    };
+    let path = entry.path();
+    if path == root {
+        return false;
+    }
+
+    let is_dir = entry
+        .file_type()
+        .is_some_and(|file_type| file_type.is_dir());
+    if excluded_globs
+        .matched_path_or_any_parents(path, is_dir)
+        .is_ignore()
+    {
+        return true;
+    }
+
+    // Patterns such as `node_modules/**` describe a folder's contents. Probe
+    // a synthetic child so the walker can prune the folder before descending.
+    is_dir
+        && excluded_globs
+            .matched_path_or_any_parents(path.join("__sideromelane_probe__"), false)
+            .is_ignore()
 }
 
 fn has_markdown_extension(path: &Path) -> bool {
@@ -250,6 +306,34 @@ mod tests {
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
         assert!(!names.iter().any(|name| name.contains("Build")));
+    }
+
+    #[test]
+    fn excluded_globs_hide_files_and_folders_from_walk() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        touch(root, "Keep.md");
+        touch(root, "node_modules/Skip.md");
+        touch(root, "Project/.obsidian/Hidden.md");
+        touch(root, "Nested/cache/Generated.md");
+
+        let options = WalkOptions {
+            include_dotfiles: true,
+            excluded_globs: vec![
+                "node_modules/**".to_string(),
+                "**/.obsidian/**".to_string(),
+                "**/cache/**".to_string(),
+            ],
+            ..WalkOptions::default()
+        };
+        let paths = walk_markdown_paths(root, &options).expect("walk ok");
+        let names: Vec<String> = paths
+            .iter()
+            .filter_map(|path| path.strip_prefix(root).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(names, vec!["Keep.md"]);
     }
 
     #[test]

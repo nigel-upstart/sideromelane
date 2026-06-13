@@ -263,6 +263,7 @@ impl eframe::App for SideromelaneApp {
 
         if self.preferences_open {
             let context = ui.ctx().clone();
+            let previous_excluded_globs = self.app_state.excluded_file_globs.clone();
             let changed = self.preferences_window.show(
                 &context,
                 &mut self.preferences_open,
@@ -270,6 +271,13 @@ impl eframe::App for SideromelaneApp {
             );
             if changed {
                 self.app_state_dirty = true;
+                if self.app_state.excluded_file_globs != previous_excluded_globs
+                    && let Some(root) = self.folder.as_ref().map(|folder| folder.root.clone())
+                {
+                    self.status = "Excluded files updated".into();
+                    self.active_block_index = None;
+                    self.dispatch_rescan(root);
+                }
             }
         }
 
@@ -350,9 +358,9 @@ impl FolderState {
     /// user has an editable surface immediately. The full rescan is dispatched to
     /// the background indexer by the caller, and the search/folder indexes stay
     /// empty (showing "Indexing…") until the first `IndexUpdated` event arrives.
-    fn load(root: PathBuf) -> std_io::Result<Self> {
+    fn load(root: PathBuf, app_state: &AppState) -> std_io::Result<Self> {
         let settings = FolderSettings::load(&root).map_err(std_io::Error::other)?;
-        let initial = initial_note(&root)?;
+        let initial = initial_note(&root, &app_state.excluded_file_globs)?;
         let (notes, selected) =
             initial.map_or_else(|| (Vec::new(), None), |record| (vec![record], Some(0)));
 
@@ -433,7 +441,7 @@ impl SideromelaneApp {
     }
 
     fn open_folder(&mut self, root: PathBuf, ctx: &egui::Context) {
-        match FolderState::load(root) {
+        match FolderState::load(root, &self.app_state) {
             Ok(folder) => {
                 self.status = format!("Opened {}", folder.root.display());
                 let scan_root = folder.root.clone();
@@ -733,7 +741,7 @@ impl SideromelaneApp {
         let options = self
             .folder
             .as_ref()
-            .map(|folder| walk_options_for(&folder.settings))
+            .map(|folder| walk_options_for(&folder.settings, &self.app_state))
             .unwrap_or_default();
         if let Some(folder) = self.folder.as_mut() {
             folder.indexes_ready = false;
@@ -1592,10 +1600,11 @@ fn clamp_split_height(ratio: f32, total_height: f32) -> f32 {
     (ratio * total_height).clamp(80.0, total_height - 80.0 - HANDLE_PX)
 }
 
-fn walk_options_for(settings: &FolderSettings) -> WalkOptions {
+fn walk_options_for(settings: &FolderSettings, app_state: &AppState) -> WalkOptions {
     WalkOptions {
         include_dotfiles: settings.ignore.include_dotfiles,
         honor_gitignore: settings.ignore.honor_gitignore,
+        excluded_globs: app_state.excluded_file_globs.clone(),
         ..WalkOptions::default()
     }
 }
@@ -1606,29 +1615,25 @@ fn walk_options_for(settings: &FolderSettings) -> WalkOptions {
 /// first Markdown file found by a shallow read of the root directory.
 /// Returns `Ok(None)` for a folder with no Markdown files, and surfaces
 /// IO errors only when the root itself cannot be read.
-fn initial_note(root: &Path) -> std_io::Result<Option<NoteRecord>> {
+fn initial_note(root: &Path, excluded_globs: &[String]) -> std_io::Result<Option<NoteRecord>> {
+    let options = WalkOptions {
+        excluded_globs: excluded_globs.to_vec(),
+        max_depth: Some(1),
+        ..WalkOptions::default()
+    };
+    let paths =
+        sideromelane_core::walk_markdown_paths(root, &options).map_err(std_io::Error::other)?;
     let preferred = root.join("Untitled.md");
-    if preferred.is_file()
-        && let Ok(record) = NoteRecord::read(root, preferred)
+
+    if let Some(path) = paths.iter().find(|path| **path == preferred)
+        && let Ok(record) = NoteRecord::read(root, path.clone())
     {
         return Ok(Some(record));
     }
 
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file()
-            && path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-            && let Ok(record) = NoteRecord::read(root, path)
-        {
-            return Ok(Some(record));
-        }
-    }
-
-    Ok(None)
+    Ok(paths
+        .into_iter()
+        .find_map(|path| NoteRecord::read(root, path).ok()))
 }
 
 fn read_image_header(path: &Path, buffer: &mut [u8; 16]) -> std_io::Result<usize> {
@@ -1680,8 +1685,12 @@ fn merge_discovered_notes(folder: &mut FolderState, discovered: Vec<indexer::Not
         }
     }
     for (_, leftover) in existing {
-        // Carry over any unsaved-on-disk notes (e.g. fresh "Untitled" buffers).
-        merged.push(leftover);
+        // Carry over unsaved-on-disk notes (e.g. fresh "Untitled" buffers),
+        // but drop clean notes that a rescan no longer discovers because
+        // they were deleted or now match global exclusion globs.
+        if leftover.dirty {
+            merged.push(leftover);
+        }
     }
 
     folder.selected =
@@ -1811,12 +1820,16 @@ fn copy_asset(source_path: &Path, target_path: &Path) -> std_io::Result<()> {
 mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+    use std::time::Instant;
 
-    use super::{NoteId, clamp_split_height, refresh_auto_expanded_paths};
+    use sideromelane_core::{FolderIndex, FolderSettings, HybridSearchIndex, NoteId};
+    use tempfile::TempDir;
 
-    fn note_id(path: &str) -> NoteId {
-        NoteId::from_folder_relative_path(PathBuf::from(path)).expect("valid note id")
-    }
+    use super::{
+        FolderState, NoteRecord, build_note_path_index, clamp_split_height, initial_note,
+        merge_discovered_notes, refresh_auto_expanded_paths, walk_options_for,
+    };
+    use crate::{indexer, state::AppState};
 
     #[test]
     fn clamp_split_height_midpoint() {
@@ -1862,5 +1875,121 @@ mod tests {
 
         assert!(!auto_expanded.contains("Projects"));
         assert!(auto_expanded.contains("Archive"));
+    }
+
+    #[test]
+    fn walk_options_include_global_excluded_file_globs() {
+        let app_state = AppState {
+            excluded_file_globs: vec!["target/**".into(), "**/.obsidian/**".into()],
+            ..AppState::default()
+        };
+        let options = walk_options_for(&FolderSettings::default(), &app_state);
+
+        assert_eq!(options.excluded_globs, app_state.excluded_file_globs);
+    }
+
+    #[test]
+    fn initial_note_skips_glob_excluded_root_notes() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("Untitled.md"), "# hidden\n").expect("write hidden");
+        std::fs::write(root.join("Visible.md"), "# visible\n").expect("write visible");
+
+        let note = initial_note(root, &["Untitled.md".to_string()])
+            .expect("initial note")
+            .expect("visible note");
+
+        assert_eq!(note.note_id.relative_path(), PathBuf::from("Visible.md"));
+    }
+
+    #[test]
+    fn merge_discovered_notes_drops_clean_notes_missing_from_rescan() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut folder = folder_with_notes(
+            dir.path(),
+            vec![
+                app_note(dir.path(), "Keep.md", false),
+                app_note(dir.path(), "node_modules/Skip.md", false),
+            ],
+            Some(1),
+        );
+        let discovered = vec![indexer::NoteRecord {
+            note_id: note_id("Keep.md"),
+            absolute_path: dir.path().join("Keep.md"),
+            source: "# keep\n".into(),
+        }];
+
+        merge_discovered_notes(&mut folder, discovered);
+
+        assert_eq!(folder.notes.len(), 1);
+        assert_eq!(
+            folder.notes[0].note_id.relative_path(),
+            PathBuf::from("Keep.md")
+        );
+        assert_eq!(folder.selected, Some(0));
+    }
+
+    #[test]
+    fn merge_discovered_notes_preserves_dirty_notes_missing_from_rescan() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut folder = folder_with_notes(
+            dir.path(),
+            vec![
+                app_note(dir.path(), "Keep.md", false),
+                app_note(dir.path(), "Untitled.md", true),
+            ],
+            Some(1),
+        );
+        let discovered = vec![indexer::NoteRecord {
+            note_id: note_id("Keep.md"),
+            absolute_path: dir.path().join("Keep.md"),
+            source: "# keep\n".into(),
+        }];
+
+        merge_discovered_notes(&mut folder, discovered);
+
+        assert_eq!(folder.notes.len(), 2);
+        assert!(
+            folder
+                .notes
+                .iter()
+                .any(|note| note.note_id.relative_path() == std::path::Path::new("Untitled.md"))
+        );
+        assert_eq!(folder.selected, Some(1));
+    }
+
+    fn folder_with_notes(
+        root: &std::path::Path,
+        notes: Vec<NoteRecord>,
+        selected: Option<usize>,
+    ) -> FolderState {
+        let note_path_index = build_note_path_index(&notes);
+        FolderState {
+            root: root.to_path_buf(),
+            notes,
+            selected,
+            search_index: HybridSearchIndex::default(),
+            folder_index: FolderIndex::default(),
+            settings: FolderSettings::default(),
+            indexes_ready: false,
+            cached_tree: None,
+            auto_expanded: std::collections::BTreeSet::new(),
+            auto_expanded_note: None,
+            note_path_index,
+        }
+    }
+
+    fn app_note(root: &std::path::Path, relative_path: &str, dirty: bool) -> NoteRecord {
+        NoteRecord {
+            note_id: note_id(relative_path),
+            absolute_path: root.join(relative_path),
+            source: format!("# {relative_path}\n"),
+            dirty,
+            last_edit_at: Instant::now(),
+        }
+    }
+
+    fn note_id(relative_path: &str) -> NoteId {
+        NoteId::from_folder_relative_path(PathBuf::from(relative_path)).expect("valid note id")
     }
 }
