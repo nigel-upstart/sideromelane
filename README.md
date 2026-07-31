@@ -1,5 +1,7 @@
 # Sideromelane
 
+**This repo is archived! Was a fun attempt to make a markdown folder reader/writer/organizer, but I'm never going to finish it!**
+
 Sideromelane is a native macOS Markdown notes app written in Rust. It opens a local folder of
 `.md` files, indexes their content and links, and lets you read, edit, search, and explore the
 graph of connections — entirely offline. No cloud sync, no proprietary storage format, no plugin
